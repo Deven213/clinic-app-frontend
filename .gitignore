@@ -51,6 +51,7 @@ coverage
 # Misc
 *.tgz
 .eslintcache
+.claude/
 
 # Exclude backend from this repo (frontend repo only)
 backend/
