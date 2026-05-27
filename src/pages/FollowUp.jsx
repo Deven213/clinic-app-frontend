@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 
-const API = 'https://medical-project-h6yc.vercel.app';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 const STATUS_CLASS = {
   Pending:   'badge-warning',

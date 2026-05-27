@@ -8,7 +8,7 @@ import MedicalLoader from '../components/MedicalLoader.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const API = 'https://medical-project-h6yc.vercel.app';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 const fmt = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
 const emptyItem = () => ({ id: Date.now() + Math.random(), description: '', amount: '' });
 

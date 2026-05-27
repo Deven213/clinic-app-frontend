@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
 import { Send, CheckCircle, AlertCircle, Headphones, Mail, MessageSquare, User, HelpCircle, Clock, ShieldCheck } from 'lucide-react';
 
-const API = 'https://medical-project-h6yc.vercel.app';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 const FAQ = [
   { q: 'How do I add a new patient?', a: 'Go to the Patients page and click "Add Patient". Fill in the required details and save.' },

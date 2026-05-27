@@ -4,7 +4,7 @@ import { Search, Plus, Phone, History, Loader2, X, RefreshCw, User, Trash2 } fro
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const API = 'https://medical-project-h6yc.vercel.app';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 export default function Patients() {
   const navigate = useNavigate();

@@ -3,7 +3,7 @@ import { Pill, AlertTriangle, Search, PlusCircle, Loader2, RefreshCw, X, Save, I
 import { useAuth } from '../context/AuthContext.jsx';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 
-const API = 'https://medical-project-h6yc.vercel.app';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 function stockStatus(item) {
   if (item.stockQuantity === 0) return 'Out of Stock';

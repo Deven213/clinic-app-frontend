@@ -71,7 +71,8 @@ export function AuthProvider({ children }) {
     // Try syncing to backend (non-blocking)
     try {
       const token = await cred.user.getIdToken();
-      await fetch(`https://medical-project-h6yc.vercel.app/api/users`, {
+      const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+      await fetch(`${API}/api/users`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name, role: selectedRole }),

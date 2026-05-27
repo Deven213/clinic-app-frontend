@@ -6,7 +6,7 @@ import {
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const API = 'https://medical-project-h6yc.vercel.app';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 /* ── Dosha styles ─────────────────────────────────────────────────────────── */
 const DOSHA_STYLE = {
