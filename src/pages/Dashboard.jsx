@@ -1,509 +1,559 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Users, Calendar, TrendingUp, AlertCircle,
-  Loader2, IndianRupee, History, Play,
-  CheckCircle2, XCircle, Timer, Activity, CalendarDays, Clock,
+  Calendar, ChevronLeft, ChevronRight, Users, Pill, IndianRupee,
+  ClipboardList, Clock, CheckCircle2, XCircle, Timer, CalendarClock,
+  Loader2, FileText, Wallet, Activity, RotateCcw, Stethoscope, Phone,
 } from 'lucide-react';
 import MedicalLoader from '../components/MedicalLoader.jsx';
-import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer,
-} from 'recharts';
 import { useAuth } from '../context/AuthContext.jsx';
 
-// Read the API base URL from the env file so we don't hardcode the deployed URL.
-// Falls back to the local backend if the env var is missing.
+/*
+ * MediCore — "Day report" dashboard (main-content area only).
+ *
+ * Goal: let the doctor pick ANY date and review that whole day at a glance —
+ * patients seen, prescriptions/medicines, revenue/billing, and follow-ups.
+ * Built only from existing endpoints. Where an endpoint can't filter by date
+ * server-side, we fetch once and filter client-side (see TODOs).
+ *
+ * Endpoints used:
+ *   GET /api/appointments?startDate=&endDate=   (server-side date filter ✓)
+ *   GET /api/dashboard/stats?start=&end=        (per-day revenue/counts ✓)
+ *   GET /api/dashboard/chart?start=&end=        (14-day strip)
+ *   GET /api/prescriptions?limit=500            (filtered client-side by createdAt)
+ *   GET /api/billing?limit=500                  (filtered client-side by createdAt)
+ *   GET /api/followup                           (filtered client-side by dueDate)
+ */
+
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const toISO = (d) => d.toISOString().split('T')[0];
-const today = () => toISO(new Date());
-const fmt = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+// TODO: /api/prescriptions and /api/billing have no server-side date filter,
+// so we pull up to 500 of the most recent records and filter on the client.
+// For a high-volume clinic, add ?start=&end= to those routes and switch the
+// fetches below to per-day requests.
+const FETCH_LIMIT = 500;
 
-// Compute start/end ISO date strings for a given timeframe key.
-// "today" / "week" (last 7d incl. today) / "month" (last 30d incl. today)
-function rangeForTimeframe(tf) {
-  const end = new Date();
-  const start = new Date();
-  if (tf === 'week') start.setDate(start.getDate() - 6);
-  else if (tf === 'month') start.setDate(start.getDate() - 29);
-  return { start: toISO(start), end: toISO(end) };
-}
+// ─── date helpers (local-time, YYYY-MM-DD) ──────────────────────────────────
+const ymd = (d) => {
+  // Local-time YYYY-MM-DD (en-CA gives ISO-like order)
+  return d.toLocaleDateString('en-CA');
+};
+const todayYMD = () => ymd(new Date());
+const parseYMD = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const sameLocalDay = (isoOrDate, dayStr) => {
+  if (!isoOrDate) return false;
+  return ymd(new Date(isoOrDate)) === dayStr;
+};
+const fmtMoney = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+const prettyDate = (dayStr) =>
+  parseYMD(dayStr).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+const shiftDay = (dayStr, delta) => { const d = parseYMD(dayStr); d.setDate(d.getDate() + delta); return ymd(d); };
 
-// Greeting picks based on hour-of-day, including a late-night case.
-function timeGreeting() {
-  const h = new Date().getHours();
-  if (h >= 5 && h < 12) return 'Good morning';
-  if (h >= 12 && h < 17) return 'Good afternoon';
-  if (h >= 17 && h < 21) return 'Good evening';
-  return 'Working late';
-}
-
-// Format today's date as "Tuesday, 20 May"
-function todayLabel() {
-  return new Date().toLocaleDateString('en-IN', {
-    weekday: 'long', day: 'numeric', month: 'long',
-  });
-}
-
-// ── Status config ──────────────────────────────────────────────────────────────
 const STATUS_CFG = {
   Waiting:   { color: '#92400e', bg: '#fef9ec', icon: Timer,        label: 'Waiting'   },
   Scheduled: { color: '#2d8653', bg: '#e8f5ee', icon: Calendar,     label: 'Scheduled' },
   Completed: { color: '#1a5c38', bg: '#d4edde', icon: CheckCircle2, label: 'Completed' },
   Cancelled: { color: '#6b7280', bg: '#f3f4f6', icon: XCircle,      label: 'Cancelled' },
 };
-const getStatus = (s) => STATUS_CFG[s] || STATUS_CFG.Waiting;
+const statusOf = (s) => STATUS_CFG[s] || STATUS_CFG.Waiting;
 
-// ─── Stat Card ────────────────────────────────────────────────────────────────
-function StatCard({ icon: Icon, iconBg, iconColor, label, value, loading }) {
+// ─── KPI tile ───────────────────────────────────────────────────────────────
+function Kpi({ icon: Icon, iconBg, iconColor, label, value, sub, loading }) {
   return (
-    <div className="glass-panel stat-card">
-      <div className="stat-icon" style={{ background: iconBg, color: iconColor }}>
-        {loading ? <Loader2 size={26} className="animate-spin" /> : <Icon size={28} />}
+    <div className="glass-panel" style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px 16px' }}>
+      <div style={{
+        width: '42px', height: '42px', borderRadius: '12px', flexShrink: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'center', background: iconBg, color: iconColor,
+      }}>
+        {loading ? <Loader2 size={19} className="animate-spin" /> : <Icon size={20} />}
       </div>
-      <div className="stat-info">
-        <div className="stat-label">{label}</div>
-        <div className="stat-value">{loading ? '—' : value}</div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>{label}</div>
+        <div style={{ fontSize: '1.35rem', fontWeight: 700, color: 'var(--text-main)', lineHeight: 1.15 }}>
+          {loading ? '—' : value}
+        </div>
+        {sub && <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '1px' }}>{sub}</div>}
       </div>
     </div>
   );
 }
 
-// ─── Timeframe Chip Group ────────────────────────────────────────────────────
-function TimeframeChips({ value, onChange }) {
-  const opts = [
-    { key: 'today', label: 'Today' },
-    { key: 'week',  label: 'This Week' },
-    { key: 'month', label: 'This Month' },
-  ];
+// ─── Section panel wrapper ──────────────────────────────────────────────────
+function Section({ icon: Icon, title, count, children, action }) {
   return (
-    <div style={{ display: 'inline-flex', background: 'var(--bg-muted, #f3f4f6)', borderRadius: '10px', padding: '3px' }}>
-      {opts.map(o => {
-        const active = value === o.key;
-        return (
-          <button
-            key={o.key}
-            onClick={() => onChange(o.key)}
-            style={{
-              padding: '6px 14px',
-              border: 'none',
-              borderRadius: '8px',
-              background: active ? '#16a34a' : 'transparent',
-              color: active ? '#fff' : 'var(--text-muted)',
-              fontWeight: 600,
-              fontSize: '0.82rem',
-              cursor: 'pointer',
-              transition: 'all 0.15s',
-            }}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── Status Summary Bar ───────────────────────────────────────────────────────
-function StatusSummary({ queue, loading }) {
-  if (loading) return null;
-  const counts = { Waiting: 0, Scheduled: 0, Completed: 0, Cancelled: 0 };
-  queue.forEach(a => { if (counts[a.status] !== undefined) counts[a.status]++; else counts.Waiting++; });
-  if (queue.length === 0) return null;
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', paddingBottom: '4px' }}>
-      {Object.entries(STATUS_CFG).map(([key, cfg]) => (
-        <span key={key} style={{
-          display: 'inline-flex', alignItems: 'center', gap: '5px',
-          padding: '3px 10px', borderRadius: '6px',
-          background: cfg.bg, fontSize: '0.75rem', fontWeight: 600, color: cfg.color,
-        }}>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: cfg.color, display: 'inline-block', flexShrink: 0 }} />
-          {cfg.label} <strong>{counts[key] || 0}</strong>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// ─── Status Pill (under greeting) ─────────────────────────────────────────────
-function StatusPill({ apptsToday, followUpsOverdue, loading }) {
-  return (
-    <div style={{
-      display: 'inline-flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
-      marginTop: '6px', padding: '6px 12px', borderRadius: '20px',
-      background: '#f0fdf4', border: '1px solid #bbf7d0',
-      fontSize: '0.82rem', color: '#15803d', fontWeight: 500,
-    }}>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-        <CalendarDays size={13} /> {todayLabel()}
-      </span>
-      <span style={{ color: '#86efac' }}>·</span>
-      <span>
-        {loading ? '…' : (
-          <><strong>{apptsToday}</strong> appointment{apptsToday === 1 ? '' : 's'} today</>
+    <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Icon size={17} color="var(--primary)" />
+        <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>{title}</h2>
+        {count != null && (
+          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: 'var(--bg-muted)', padding: '2px 9px', borderRadius: '20px', fontWeight: 600 }}>
+            {count}
+          </span>
         )}
-      </span>
-      <span style={{ color: '#86efac' }}>·</span>
-      <span style={{ color: followUpsOverdue > 0 ? '#b91c1c' : '#15803d' }}>
-        {loading ? '…' : (
-          <><strong>{followUpsOverdue}</strong> follow-up{followUpsOverdue === 1 ? '' : 's'} due</>
-        )}
-      </span>
+        {action && <div style={{ marginLeft: 'auto' }}>{action}</div>}
+      </div>
+      {children}
     </div>
   );
 }
 
-// ─── Main Dashboard ───────────────────────────────────────────────────────────
+const emptyHint = (text) => (
+  <div style={{ textAlign: 'center', padding: '26px 0', color: 'var(--text-muted)', fontSize: '0.84rem' }}>{text}</div>
+);
+
+// ─── 14-day clickable strip (busyness navigator) ────────────────────────────
+function DayStrip({ insights, selected, onPick }) {
+  if (!insights.length) return null;
+  const max = Math.max(1, ...insights.map((d) => d.patients || 0));
+  return (
+    <div className="glass-panel" style={{ padding: '12px 16px', marginBottom: '20px' }}>
+      <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '8px' }}>
+        Last 14 days · click a day to jump (bar height = new patients)
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: '4px', height: '64px' }}>
+        {insights.map((d) => {
+          const isSel = d.date === selected;
+          const h = Math.round(((d.patients || 0) / max) * 46) + 6;
+          return (
+            <button
+              key={d.date}
+              onClick={() => onPick(d.date)}
+              title={`${d.label} · ${d.patients} patients · ${fmtMoney(d.revenue)}`}
+              style={{
+                flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px',
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+              }}
+            >
+              <div style={{
+                width: '100%', height: `${h}px`, borderRadius: '4px',
+                background: isSel ? 'var(--primary)' : 'var(--primary-mid)',
+                transition: 'background 0.15s',
+              }} />
+              <span style={{ fontSize: '0.6rem', color: isSel ? 'var(--primary)' : 'var(--text-muted)', fontWeight: isSel ? 700 : 400, whiteSpace: 'nowrap' }}>
+                {d.label.split(' ')[0]}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════════
 export default function Dashboard() {
   const navigate = useNavigate();
   const { userName, role, authFetch } = useAuth();
 
-  // ── Timeframe ──
-  // 'today' (default) | 'week' | 'month' — drives stats + chart range.
-  // The queue + status pill always reflect today regardless of this.
-  const [timeframe, setTimeframe] = useState('today');
-  const { start: statsStart, end: statsEnd } = rangeForTimeframe(timeframe);
+  const [selected, setSelected] = useState(todayYMD()); // selected day (YYYY-MM-DD)
 
-  // ── Data ──
+  // Per-day (server-filtered)
+  const [appointments, setAppointments] = useState([]);
   const [stats, setStats] = useState(null);
-  const [chart, setChart] = useState([]);
-  const [queue, setQueue] = useState([]);
-  const [followUpsOverdue, setFollowUpsOverdue] = useState(0);
+  const [loadingDay, setLoadingDay] = useState(true);
 
-  // ── Loading ──
-  const [loadingStats, setLoadingStats] = useState(true);
-  const [loadingChart, setLoadingChart] = useState(true);
-  const [loadingQueue, setLoadingQueue] = useState(true);
-  const [loadingPill,  setLoadingPill]  = useState(true);
-  const [error, setError] = useState('');
+  // Full lists (fetched once, filtered client-side per day)
+  const [allRx, setAllRx] = useState([]);
+  const [allBills, setAllBills] = useState([]);
+  const [allFollowUps, setAllFollowUps] = useState([]);
+  const [insights, setInsights] = useState([]);
+  const [loadingAll, setLoadingAll] = useState(true);
 
-  // ── Fetch: stats for the selected timeframe ──
-  const fetchStats = useCallback(async (s, e) => {
-    setLoadingStats(true);
-    setError('');
+  const isToday = selected === todayYMD();
+  const displayName = userName || (role === 'Doctor' ? 'Doctor' : 'Staff');
+
+  // ── Fetch per-day data (appointments + stats) whenever the date changes ──
+  const fetchDay = useCallback(async (day) => {
+    setLoadingDay(true);
     try {
-      const r = await authFetch(`${API}/api/dashboard/stats?start=${s}&end=${e}`);
-      if (!r.ok) throw new Error();
-      setStats(await r.json());
+      const [aRes, sRes] = await Promise.all([
+        authFetch(`${API}/api/appointments?startDate=${day}&endDate=${day}&limit=${FETCH_LIMIT}`),
+        authFetch(`${API}/api/dashboard/stats?start=${day}&end=${day}`),
+      ]);
+      const a = aRes.ok ? await aRes.json() : { appointments: [] };
+      setAppointments(Array.isArray(a) ? a : (a.appointments || []));
+      setStats(sRes.ok ? await sRes.json() : null);
     } catch {
-      setStats(null);
-    } finally { setLoadingStats(false); }
+      setAppointments([]); setStats(null);
+    } finally { setLoadingDay(false); }
   }, [authFetch]);
 
-  // ── Fetch: chart series for the selected timeframe ──
-  const fetchChart = useCallback(async (s, e) => {
-    setLoadingChart(true);
-    try {
-      const r = await authFetch(`${API}/api/dashboard/chart?start=${s}&end=${e}`);
-      if (!r.ok) throw new Error();
-      setChart(await r.json());
-    } catch { setChart([]); }
-    finally { setLoadingChart(false); }
-  }, [authFetch]);
+  useEffect(() => { fetchDay(selected); }, [selected, fetchDay]);
 
-  // ── Fetch: queue is always TODAY ──
-  const fetchQueue = useCallback(async () => {
-    setLoadingQueue(true);
-    try {
-      const today = toISO(new Date());
-      const params = new URLSearchParams({ startDate: today, endDate: today, limit: 500 });
-      const r = await authFetch(`${API}/api/appointments?${params}`);
-      if (!r.ok) throw new Error();
-      const data = await r.json();
-      setQueue(Array.isArray(data) ? data : (data.appointments || []));
-    } catch { setQueue([]); }
-    finally { setLoadingQueue(false); }
-  }, [authFetch]);
-
-  // ── Fetch: overdue follow-up count for the status pill ──
-  const fetchOverdueFollowUps = useCallback(async () => {
-    setLoadingPill(true);
-    try {
-      const r = await authFetch(`${API}/api/followup?filter=overdue`);
-      if (!r.ok) throw new Error();
-      const arr = await r.json();
-      setFollowUpsOverdue(Array.isArray(arr) ? arr.length : 0);
-    } catch { setFollowUpsOverdue(0); }
-    finally { setLoadingPill(false); }
-  }, [authFetch]);
-
-  // Refetch stats + chart whenever the timeframe changes.
+  // ── Fetch full lists once on mount ──
   useEffect(() => {
-    fetchStats(statsStart, statsEnd);
-    fetchChart(statsStart, statsEnd);
-  }, [statsStart, statsEnd, fetchStats, fetchChart]);
+    let alive = true;
+    (async () => {
+      setLoadingAll(true);
+      try {
+        const end = new Date();
+        const start = new Date(); start.setDate(start.getDate() - 13);
+        const [rxRes, blRes, fuRes, chRes] = await Promise.all([
+          authFetch(`${API}/api/prescriptions?limit=${FETCH_LIMIT}`),
+          authFetch(`${API}/api/billing?limit=${FETCH_LIMIT}`),
+          authFetch(`${API}/api/followup`),
+          authFetch(`${API}/api/dashboard/chart?start=${ymd(start)}&end=${ymd(end)}`),
+        ]);
+        if (!alive) return;
+        const rx = rxRes.ok ? await rxRes.json() : [];
+        setAllRx(Array.isArray(rx) ? rx : []);
+        const bl = blRes.ok ? await blRes.json() : { bills: [] };
+        setAllBills(Array.isArray(bl) ? bl : (bl.bills || []));
+        const fu = fuRes.ok ? await fuRes.json() : [];
+        setAllFollowUps(Array.isArray(fu) ? fu : []);
+        const ch = chRes.ok ? await chRes.json() : [];
+        setInsights(Array.isArray(ch) ? ch : []);
+      } catch {
+        if (alive) { setAllRx([]); setAllBills([]); setAllFollowUps([]); setInsights([]); }
+      } finally { if (alive) setLoadingAll(false); }
+    })();
+    return () => { alive = false; };
+  }, [authFetch]);
 
-  // Initial queue + pill fetch.
-  useEffect(() => {
-    fetchQueue();
-    fetchOverdueFollowUps();
-  }, [fetchQueue, fetchOverdueFollowUps]);
+  // ── Derive the selected day's slices ──
+  const dayRx = useMemo(
+    () => allRx.filter((p) => sameLocalDay(p.createdAt, selected)),
+    [allRx, selected]
+  );
+  const dayBills = useMemo(
+    () => allBills.filter((b) => sameLocalDay(b.createdAt, selected)),
+    [allBills, selected]
+  );
+  const dayFollowUps = useMemo(
+    () => allFollowUps.filter((f) => sameLocalDay(f.dueDate, selected)),
+    [allFollowUps, selected]
+  );
 
-  // ── Auto-refresh: queue + pill every 30s (queue is the most volatile thing) ──
-  useEffect(() => {
-    const id = setInterval(() => {
-      // Skip while tab is hidden — saves network/battery.
-      if (document.visibilityState !== 'visible') return;
-      fetchQueue();
-      fetchOverdueFollowUps();
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [fetchQueue, fetchOverdueFollowUps]);
+  // diagnosis lookup by patientId from that day's prescriptions (to enrich the
+  // appointments table — appointments don't carry a diagnosis).
+  const diagnosisByPatient = useMemo(() => {
+    const m = {};
+    dayRx.forEach((p) => {
+      const pid = (p.patientId && (p.patientId._id || p.patientId)) || null;
+      if (pid && p.diagnosis) m[String(pid)] = p.diagnosis;
+    });
+    return m;
+  }, [dayRx]);
 
-  // Today's appointment count for the status pill.
-  // When timeframe === 'today' this equals stats.appointmentsCount, otherwise
-  // we use queue.length (which is always today's data).
-  const apptsToday = timeframe === 'today'
-    ? (stats?.appointmentsCount ?? queue.length)
-    : queue.length;
+  // Billing breakdown for the day
+  const billing = useMemo(() => {
+    let collected = 0, pending = 0, paidCount = 0, unpaidCount = 0;
+    const byMethod = {};
+    dayBills.forEach((b) => {
+      if (b.paidStatus) { collected += b.totalAmount; paidCount++; byMethod[b.paymentMethod || 'Other'] = (byMethod[b.paymentMethod || 'Other'] || 0) + b.totalAmount; }
+      else { pending += b.totalAmount; unpaidCount++; }
+    });
+    return { collected, pending, paidCount, unpaidCount, byMethod };
+  }, [dayBills]);
 
-  // The "current" patient is the first non-Completed/Cancelled row in the queue
-  // (sorted by token). This is what gets the colored left border.
-  const currentIdx = queue.findIndex(a => a.status !== 'Completed' && a.status !== 'Cancelled');
+  // Top medicines prescribed that day
+  const topMeds = useMemo(() => {
+    const counts = {};
+    dayRx.forEach((p) => (p.medicines || []).forEach((m) => {
+      const name = (m.name || '').trim();
+      if (name) counts[name] = (counts[name] || 0) + 1;
+    }));
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  }, [dayRx]);
 
-  // ── Actions ────────────────────────────────────────────────────────────────
-  const startConsultation = (appt) => {
-    // Prescription.jsx already reads location.state.appointment.
-    navigate('/prescription', { state: { appointment: appt } });
-  };
+  // Appointment status counts
+  const statusCounts = useMemo(() => {
+    const c = { Waiting: 0, Scheduled: 0, Completed: 0, Cancelled: 0 };
+    appointments.forEach((a) => { c[a.status] = (c[a.status] || 0) + 1; });
+    return c;
+  }, [appointments]);
 
-  const viewHistory = (appt) => {
-    if (appt.patientId) navigate(`/patients/${appt.patientId}/history`);
-    else navigate('/patients');
-  };
+  // Navigate to a patient's prescription form (reuses existing routing).
+  const openPatient = (appt) => navigate('/prescription', { state: { appointment: appt } });
+
+  const hasAnyData = appointments.length || dayRx.length || dayBills.length || dayFollowUps.length;
 
   return (
     <div className="animate-fade-in" style={{ padding: '4px 0' }}>
 
-      {/* ── Page Header: greeting + status pill on left, timeframe chips on right ── */}
-      <div className="page-header" style={{ marginBottom: '20px', alignItems: 'flex-start' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h1 className="page-title">Clinic Overview</h1>
-          <p className="page-subtitle" style={{ marginBottom: '4px' }}>
-            {timeGreeting()}, {userName || (role === 'Doctor' ? 'Doctor' : 'Staff')}!
+      {/* ── Header: title + date navigator ── */}
+      <div className="page-header" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+        <div>
+          <h1 className="page-title">Day report</h1>
+          <p className="page-subtitle" style={{ margin: 0 }}>
+            {isToday ? `Today — ${prettyDate(selected)}` : prettyDate(selected)}
+            {' · Dr. '}{displayName}
           </p>
-          <StatusPill
-            apptsToday={apptsToday}
-            followUpsOverdue={followUpsOverdue}
-            loading={loadingPill || (loadingStats && timeframe === 'today')}
-          />
         </div>
-        <TimeframeChips value={timeframe} onChange={setTimeframe} />
+
+        {/* Date navigator */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <button
+            className="btn btn-outline"
+            style={{ padding: '8px 10px' }}
+            onClick={() => setSelected((s) => shiftDay(s, -1))}
+            title="Previous day"
+          >
+            <ChevronLeft size={16} />
+          </button>
+
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            background: 'var(--bg-input)', border: '1.5px solid var(--border-color)',
+            borderRadius: '10px', padding: '6px 12px',
+          }}>
+            <Calendar size={15} color="var(--primary)" />
+            <input
+              type="date"
+              value={selected}
+              max={todayYMD()}
+              onChange={(e) => e.target.value && setSelected(e.target.value)}
+              style={{ border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-main)', fontSize: '0.86rem', cursor: 'pointer', fontFamily: 'var(--font-primary)' }}
+            />
+          </div>
+
+          <button
+            className="btn btn-outline"
+            style={{ padding: '8px 10px' }}
+            onClick={() => setSelected((s) => shiftDay(s, 1))}
+            disabled={isToday}
+            title="Next day"
+          >
+            <ChevronRight size={16} />
+          </button>
+
+          {!isToday && (
+            <button className="btn btn-primary" style={{ fontSize: '0.82rem', padding: '8px 14px' }} onClick={() => setSelected(todayYMD())}>
+              <RotateCcw size={14} /> Today
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* ── Error Banner ── */}
-      {error && (
-        <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '10px', padding: '10px 16px', marginBottom: '16px', fontSize: '0.84rem', color: '#92400e', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <AlertCircle size={16} color="#d97706" /> {error}
+      {/* ── 14-day quick navigator ── */}
+      <DayStrip insights={insights} selected={selected} onPick={setSelected} />
+
+      {/* ── KPI row for the selected day ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '14px', marginBottom: '24px' }}>
+        <Kpi icon={Users} iconBg="rgba(45,134,83,0.12)" iconColor="var(--primary)"
+          label="Patients seen" value={appointments.length}
+          sub={`${statusCounts.Completed} completed`} loading={loadingDay} />
+        <Kpi icon={ClipboardList} iconBg="rgba(14,116,144,0.12)" iconColor="#0e7490"
+          label="Prescriptions" value={dayRx.length}
+          sub={topMeds.length ? `${topMeds.length} distinct medicines` : 'none'} loading={loadingAll} />
+        <Kpi icon={IndianRupee} iconBg="rgba(45,134,83,0.12)" iconColor="var(--primary)"
+          label="Collected" value={fmtMoney(stats?.totalRevenue ?? billing.collected)}
+          sub={`${billing.paidCount} paid bill${billing.paidCount === 1 ? '' : 's'}`} loading={loadingDay} />
+        <Kpi icon={Wallet} iconBg="rgba(184,115,51,0.14)" iconColor="#b87333"
+          label="Pending" value={fmtMoney(stats?.pendingRevenue ?? billing.pending)}
+          sub={`${billing.unpaidCount} unpaid`} loading={loadingDay} />
+        <Kpi icon={CalendarClock} iconBg="rgba(192,57,43,0.12)" iconColor="var(--danger)"
+          label="Follow-ups due" value={dayFollowUps.length}
+          sub={isToday ? 'today' : 'this day'} loading={loadingAll} />
+      </div>
+
+      {/* If nothing happened that day, one clear message */}
+      {!loadingDay && !loadingAll && !hasAnyData && (
+        <div className="glass-panel" style={{ textAlign: 'center', padding: '48px 16px', color: 'var(--text-muted)' }}>
+          <Calendar size={40} color="#cbd5e1" style={{ marginBottom: '10px' }} />
+          <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>No activity recorded on {prettyDate(selected)}</div>
+          <div style={{ fontSize: '0.84rem', marginTop: '4px' }}>Pick another day above, or use the 14-day strip to find a busy day.</div>
         </div>
       )}
 
-      {/* ── Stat Cards ── */}
-      <div className="dashboard-grid" style={{ marginBottom: '24px' }}>
-        <StatCard
-          icon={Users} iconBg="rgba(22,163,74,0.12)" iconColor="#16a34a"
-          label={timeframe === 'today' ? 'New Patients Today' : timeframe === 'week' ? 'New Patients (7d)' : 'New Patients (30d)'}
-          value={stats?.patientsCount ?? 0} loading={loadingStats}
-        />
-        <StatCard
-          icon={Calendar} iconBg="rgba(5,150,105,0.12)" iconColor="#059669"
-          label={timeframe === 'today' ? 'Appointments Today' : timeframe === 'week' ? 'Appointments (7d)' : 'Appointments (30d)'}
-          value={stats?.appointmentsCount ?? 0} loading={loadingStats}
-        />
-        <StatCard
-          icon={IndianRupee} iconBg="rgba(71,85,105,0.12)" iconColor="#475569"
-          label={timeframe === 'today' ? 'Revenue Today' : timeframe === 'week' ? 'Revenue (7d)' : 'Revenue (30d)'}
-          value={fmt(stats?.totalRevenue)} loading={loadingStats}
-        />
-      </div>
-
-      {/* ── Main 2-col grid: Queue (left, 2fr) + Chart (right, 1fr) ── */}
-      {/* Reuses .resp-chart-queue which already stacks on tablet/mobile */}
-      <div className="resp-chart-queue">
-
-        {/* ── Patient Queue (primary, larger column) ── */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <h2 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700 }}>Patient Queue</h2>
-              <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                {new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} · auto-refreshing every 30s
-              </p>
+      {/* ── Patients seen / appointments (wide) ── */}
+      <div style={{ marginBottom: '20px' }}>
+        <Section
+          icon={Stethoscope}
+          title="Patients seen"
+          count={appointments.length}
+          action={
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+              {Object.entries(STATUS_CFG).map(([k, cfg]) => statusCounts[k] ? (
+                <span key={k} style={{ fontSize: '0.7rem', fontWeight: 600, color: cfg.color, background: cfg.bg, padding: '2px 8px', borderRadius: '6px' }}>
+                  {cfg.label} {statusCounts[k]}
+                </span>
+              ) : null)}
             </div>
-            <span style={{ fontSize: '0.72rem', background: 'var(--bg-muted)', color: 'var(--text-muted)', padding: '3px 10px', borderRadius: '20px', fontWeight: 600, border: '1px solid var(--border-color)' }}>
-              {loadingQueue ? '…' : `${queue.length} patient${queue.length === 1 ? '' : 's'}`}
-            </span>
-          </div>
-
-          <StatusSummary queue={queue} loading={loadingQueue} />
-
-          {/* Queue list */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '520px', overflowY: 'auto' }}>
-            {loadingQueue ? (
-              <MedicalLoader text="Loading queue…" />
-            ) : queue.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '48px 0', color: '#9ca3af', fontSize: '0.9rem' }}>
-                <Calendar size={40} color="#e5e7eb" style={{ marginBottom: '10px' }} />
-                <div style={{ fontWeight: 600, color: '#6b7280' }}>No appointments today</div>
-                <div style={{ fontSize: '0.8rem', marginTop: '4px' }}>Add a walk-in or schedule from the Appointments page.</div>
-                <button
-                  className="btn btn-primary"
-                  style={{ marginTop: '14px', fontSize: '0.82rem' }}
-                  onClick={() => navigate('/appointments')}
-                >Go to Appointments</button>
-              </div>
-            ) : (
-              queue.map((p, i) => {
-                const sc = getStatus(p.status);
-                const isCurrent = i === currentIdx;
-                const ageGender = [p.age, p.gender?.[0]].filter(Boolean).join('');
-                return (
-                  <div
-                    key={p._id || p.id || i}
-                    style={{
-                      padding: '14px 16px',
-                      borderRadius: '12px',
-                      border: '1px solid var(--border-color)',
-                      borderLeft: isCurrent ? '4px solid #16a34a' : '1px solid var(--border-color)',
-                      background: isCurrent ? '#f0fdf4' : 'var(--bg-card, #fff)',
-                      display: 'grid',
-                      gridTemplateColumns: 'auto 1fr auto',
-                      gap: '14px',
-                      alignItems: 'center',
-                    }}
-                  >
-                    {/* Token */}
-                    <div style={{
-                      width: '42px', height: '42px', borderRadius: '50%',
-                      background: isCurrent ? '#16a34a' : '#f0fdf4',
-                      border: isCurrent ? 'none' : '1.5px solid #bbf7d0',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: isCurrent ? '#fff' : '#15803d',
-                      fontWeight: 700, fontSize: '0.9rem', flexShrink: 0,
-                    }}>{p.tokenNumber ?? (i + 1)}</div>
-
-                    {/* Info */}
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px', flexWrap: 'wrap' }}>
-                        <span style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--text-main)' }}>
-                          {p.patientName}
-                        </span>
-                        {ageGender && (
-                          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-                            · {ageGender}
-                          </span>
-                        )}
-                        {isCurrent && (
-                          <span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.04em', color: '#15803d', background: '#dcfce7', padding: '2px 8px', borderRadius: '4px' }}>
-                            NEXT UP
-                          </span>
-                        )}
-                        {p.isEmergency && (
-                          <span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.04em', color: '#991b1b', background: '#fee2e2', padding: '2px 8px', borderRadius: '4px' }}>
-                            EMERGENCY
-                          </span>
-                        )}
-                        <span style={{
-                          padding: '2px 8px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 600,
-                          background: sc.bg, color: sc.color,
-                        }}>{sc.label}</span>
-                      </div>
-                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                        {p.time && (
-                          <>
-                            <Clock size={12} /> {p.time}
-                            {p.reason && <span style={{ color: '#d1d5db' }}>·</span>}
-                          </>
-                        )}
-                        {p.reason || (p.time ? '' : 'No reason noted')}
-                      </div>
-                    </div>
-
-                    {/* Action buttons — stacked vertically on the right */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'stretch', minWidth: '150px' }}>
-                      <button
-                        className="btn btn-primary"
-                        style={{ fontSize: '0.78rem', padding: '7px 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                        onClick={() => startConsultation(p)}
-                        disabled={p.status === 'Completed' || p.status === 'Cancelled'}
-                      >
-                        <Play size={13} /> Start Consultation
-                      </button>
-                      <button
-                        className="btn btn-outline"
-                        style={{ fontSize: '0.78rem', padding: '7px 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                        onClick={() => viewHistory(p)}
-                      >
-                        <History size={13} /> View History
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          <button className="btn btn-outline" style={{ width: '100%', fontSize: '0.82rem', marginTop: '4px' }} onClick={() => navigate('/appointments')}>
-            View All Appointments
-          </button>
-        </div>
-
-        {/* ── Chart (secondary, smaller column) ── */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Visits & Revenue</h2>
-            <span style={{ fontSize: '0.7rem', background: '#f0fdf4', color: '#16a34a', padding: '3px 9px', borderRadius: '6px', fontWeight: 600 }}>
-              {timeframe === 'today' ? 'Today' : timeframe === 'week' ? 'Last 7 days' : 'Last 30 days'}
-            </span>
-          </div>
-          <div style={{ display: 'flex', gap: '14px', marginBottom: '8px' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-              <span style={{ width: '12px', height: '2px', background: '#16a34a', display: 'inline-block', borderRadius: '2px' }} /> Patients
-            </span>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-              <span style={{ width: '12px', height: '2px', background: '#059669', display: 'inline-block', borderRadius: '2px' }} /> Revenue
-            </span>
-          </div>
-          {loadingChart ? (
-            <MedicalLoader text="Loading chart…" />
-          ) : chart.length === 0 ? (
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '8px', color: '#9ca3af', minHeight: '260px' }}>
-              <TrendingUp size={36} color="#e5e7eb" />
-              <span style={{ fontSize: '0.82rem' }}>No data in this range</span>
-            </div>
+          }
+        >
+          {loadingDay ? (
+            <MedicalLoader text="Loading…" />
+          ) : appointments.length === 0 ? (
+            emptyHint('No appointments on this day.')
           ) : (
-            <div style={{ flex: 1, minHeight: '300px' }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chart} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="gP" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%"  stopColor="#16a34a" stopOpacity={0.5} />
-                      <stop offset="95%" stopColor="#16a34a" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="gR" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%"  stopColor="#059669" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#059669" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" vertical={false} />
-                  <XAxis dataKey="label" stroke="var(--text-muted)" tick={{ fontSize: 10 }} />
-                  <YAxis yAxisId="p" stroke="var(--text-muted)" tick={{ fontSize: 10 }} />
-                  <YAxis yAxisId="r" orientation="right" stroke="var(--text-muted)" tick={{ fontSize: 10 }} tickFormatter={v => `₹${v}`} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '10px', fontSize: '0.82rem' }}
-                    formatter={(val, name) => [name === 'patients' ? val + ' patients' : `₹${val.toLocaleString('en-IN')}`, name === 'patients' ? 'Patients' : 'Revenue']}
-                  />
-                  <Area yAxisId="p" type="monotone" dataKey="patients" stroke="#16a34a" strokeWidth={2} fillOpacity={1} fill="url(#gP)" name="patients" />
-                  <Area yAxisId="r" type="monotone" dataKey="revenue"  stroke="#059669" strokeWidth={2} fillOpacity={1} fill="url(#gR)"  name="revenue" />
-                </AreaChart>
-              </ResponsiveContainer>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="data-table" style={{ minWidth: '620px' }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: '48px' }}>#</th>
+                    <th>Patient</th>
+                    <th>Time</th>
+                    <th>Reason</th>
+                    <th>Diagnosis</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {appointments.map((a, i) => {
+                    const sc = statusOf(a.status);
+                    const pid = String(a.patientId?._id || a.patientId || '');
+                    const dx = diagnosisByPatient[pid];
+                    return (
+                      <tr key={a._id || i}>
+                        <td style={{ color: 'var(--text-muted)', fontWeight: 600 }}>{a.tokenNumber ?? i + 1}</td>
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{a.patientName}</div>
+                          {[a.age, a.gender?.[0]].filter(Boolean).length > 0 && (
+                            <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>{[a.age, a.gender?.[0]].filter(Boolean).join('')}</div>
+                          )}
+                        </td>
+                        <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{a.time || '—'}</td>
+                        <td style={{ fontSize: '0.85rem' }}>{a.reason || '—'}</td>
+                        <td style={{ fontSize: '0.85rem' }}>{dx || <span style={{ color: '#cbd5e1' }}>—</span>}</td>
+                        <td><span style={{ fontSize: '0.72rem', fontWeight: 600, color: sc.color, background: sc.bg, padding: '3px 9px', borderRadius: '6px' }}>{sc.label}</span></td>
+                        <td>
+                          <button className="btn btn-outline" style={{ fontSize: '0.72rem', padding: '5px 10px' }} onClick={() => openPatient(a)}>
+                            <FileText size={12} /> Chart
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
-        </div>
+        </Section>
+      </div>
+
+      {/* ── Prescriptions + Billing (two columns) ── */}
+      <div className="resp-chart-queue" style={{ marginBottom: '20px' }}>
+
+        {/* Prescriptions */}
+        <Section icon={Pill} title="Prescriptions & medicines" count={dayRx.length}>
+          {loadingAll ? (
+            <MedicalLoader text="Loading…" />
+          ) : dayRx.length === 0 ? (
+            emptyHint('No prescriptions written on this day.')
+          ) : (
+            <>
+              {/* Top medicines */}
+              {topMeds.length > 0 && (
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                  {topMeds.map(([name, n]) => (
+                    <span key={name} style={{ fontSize: '0.74rem', fontWeight: 500, color: 'var(--primary)', background: 'var(--primary-light)', padding: '3px 10px', borderRadius: '20px' }}>
+                      {name} <strong>×{n}</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '360px', overflowY: 'auto' }}>
+                {dayRx.map((p, i) => {
+                  const pname = p.patientId?.name || 'Unknown patient';
+                  const time = p.createdAt ? new Date(p.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '';
+                  return (
+                    <div key={p._id || i} style={{ padding: '10px 12px', border: '1px solid var(--border-color)', borderRadius: '10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                        <span style={{ fontWeight: 600, fontSize: '0.88rem' }}>{pname}</span>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{time}</span>
+                      </div>
+                      {p.diagnosis && <div style={{ fontSize: '0.78rem', color: 'var(--primary)', marginTop: '1px' }}>{p.diagnosis}</div>}
+                      <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                        {(p.medicines || []).map((m) => m.name).filter(Boolean).join(', ') || 'No medicines listed'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </Section>
+
+        {/* Billing */}
+        <Section icon={IndianRupee} title="Revenue & billing" count={dayBills.length}>
+          {loadingAll ? (
+            <MedicalLoader text="Loading…" />
+          ) : dayBills.length === 0 ? (
+            emptyHint('No invoices generated on this day.')
+          ) : (
+            <>
+              {/* Collected vs pending */}
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '4px' }}>
+                <div style={{ flex: 1, background: 'var(--primary-light)', borderRadius: '10px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Collected</div>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--primary)' }}>{fmtMoney(billing.collected)}</div>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{billing.paidCount} paid</div>
+                </div>
+                <div style={{ flex: 1, background: '#fffaf0', borderRadius: '10px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Pending</div>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#b87333' }}>{fmtMoney(billing.pending)}</div>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{billing.unpaidCount} unpaid</div>
+                </div>
+              </div>
+
+              {/* Payment method split */}
+              {Object.keys(billing.byMethod).length > 0 && (
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {Object.entries(billing.byMethod).map(([method, amt]) => (
+                    <span key={method} style={{ fontSize: '0.72rem', fontWeight: 500, color: 'var(--text-main)', background: 'var(--bg-muted)', padding: '3px 10px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
+                      {method}: {fmtMoney(amt)}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Bill list */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '300px', overflowY: 'auto' }}>
+                {dayBills.map((b, i) => (
+                  <div key={b._id || i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', border: '1px solid var(--border-color)', borderRadius: '10px' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{b.patientName}</div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{b.billType} · {b.paymentMethod}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>{fmtMoney(b.totalAmount)}</div>
+                      <span style={{ fontSize: '0.68rem', fontWeight: 600, color: b.paidStatus ? 'var(--primary)' : '#b87333' }}>
+                        {b.paidStatus ? 'Paid' : 'Unpaid'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </Section>
+      </div>
+
+      {/* ── Follow-ups due this day ── */}
+      <div style={{ marginBottom: '8px' }}>
+        <Section icon={CalendarClock} title="Follow-ups due" count={dayFollowUps.length}>
+          {loadingAll ? (
+            <MedicalLoader text="Loading…" />
+          ) : dayFollowUps.length === 0 ? (
+            emptyHint('No follow-ups due on this day.')
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '10px' }}>
+              {dayFollowUps.map((f, i) => {
+                const done = f.status === 'Completed';
+                return (
+                  <div key={f._id || i} style={{ padding: '10px 12px', border: '1px solid var(--border-color)', borderRadius: '10px', borderLeft: `3px solid ${done ? 'var(--primary)' : 'var(--danger)'}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                      <span style={{ fontWeight: 600, fontSize: '0.86rem' }}>{f.patientName}</span>
+                      <span style={{ fontSize: '0.68rem', fontWeight: 600, color: done ? 'var(--primary)' : 'var(--danger)' }}>
+                        {done ? 'Done' : 'Due'}
+                      </span>
+                    </div>
+                    {f.diagnosis && <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '1px' }}>{f.diagnosis}</div>}
+                    {f.contact && (
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '3px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Phone size={11} /> {f.contact}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Section>
       </div>
     </div>
   );
