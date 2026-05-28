@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import { FileText, Save, Send, Pill, Plus, X, Loader2, Download, AlertCircle, CheckCircle, HelpCircle } from 'lucide-react';
+import { FileText, Save, Send, Pill, Plus, X, Loader2, Download, AlertCircle, CheckCircle, HelpCircle, User, Stethoscope, ClipboardList } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import Modal from '../components/Modal.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
@@ -13,6 +13,19 @@ const emptyForm = () => ({
 });
 
 const emptyMed = () => ({ id: Date.now() + Math.random(), name: '', timing: '', anupan: '', days: 7 });
+
+// Visual-only: a small section header used to group the form fields.
+function SectionHead({ icon: Icon, title, sub, divider }) {
+  return (
+    <div style={divider ? { borderTop: '1px solid var(--border-color)', paddingTop: '18px' } : undefined}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Icon size={16} color="var(--primary)" />
+        <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-main)' }}>{title}</h3>
+        {sub && <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>{sub}</span>}
+      </div>
+    </div>
+  );
+}
 
 export default function Prescription() {
   const { authFetch, userName } = useAuth();
@@ -371,8 +384,13 @@ export default function Prescription() {
       {/* ══ LEFT PANEL — Prescription Builder ══════════════════════════════════ */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <div className="page-header" style={{ marginBottom: '20px' }}>
-          <div>
-            <h1 className="page-title">Digital Prescription</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ width: '42px', height: '42px', borderRadius: '12px', background: 'var(--primary-light)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <FileText size={22} color="var(--primary)" />
+            </div>
+            <div>
+              <h1 className="page-title" style={{ margin: 0 }}>Digital Prescription</h1>
+            </div>
           </div>
           <button className="btn btn-primary" onClick={handleNew} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 16px', fontSize: '0.875rem' }}>
             <Plus size={16} /> New Prescription
@@ -380,6 +398,8 @@ export default function Prescription() {
         </div>
 
         <div className="glass-panel" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+          <SectionHead icon={User} title="Patient details" />
 
           {/* Patient Info Row 1: Name + Age + Gender + Phone */}
           <div className="resp-grid-4">
@@ -478,6 +498,8 @@ export default function Prescription() {
                 onChange={e => setPatientData(p => ({ ...p, followUpDate: e.target.value }))} />
             </div>
           </div>
+
+          <SectionHead icon={Stethoscope} title="Diagnosis" divider />
 
           {/* Diagnosis */}
           <div>
@@ -593,6 +615,8 @@ export default function Prescription() {
             </table>
           </div>
 
+          <SectionHead icon={ClipboardList} title="Advice & notes" sub="Pathya, Apathya & doctor notes" divider />
+
           {/* Pathya / Apathya */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '4px' }}>
             <div className="input-group">
@@ -681,7 +705,7 @@ export default function Prescription() {
 
         {/* Action Buttons */}
         <div className="glass-panel" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-          <button className="btn btn-secondary" style={{ width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '11px', fontSize: '0.9rem' }}
+          <button className="btn btn-primary" style={{ width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '11px', fontSize: '0.9rem' }}
             onClick={handleSave} disabled={loading}>
             {loading ? <><Loader2 className="animate-spin" size={16} /> Saving...</> : <><Save size={16} /> Save Prescription</>}
           </button>

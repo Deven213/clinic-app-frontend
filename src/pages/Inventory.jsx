@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Pill, AlertTriangle, Search, PlusCircle, Loader2, RefreshCw, X, Save, IndianRupee, Check, Info } from 'lucide-react';
+import { Pill, AlertTriangle, Search, PlusCircle, Loader2, RefreshCw, X, Save, IndianRupee, Check, Info, Minus, Plus } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 
@@ -18,6 +18,8 @@ export default function Inventory() {
   const [stock, setStock]         = useState([]);
   const [loading, setLoading]     = useState(true);
   const [search, setSearch]       = useState('');
+  const [statusFilter, setStatusFilter] = useState('all'); // all | in | low | out
+  const [sortBy, setSortBy]              = useState('name'); // name | lowfirst
   const [showAdd, setShowAdd]     = useState(false);
   const [medForm, setMedForm]     = useState(emptyMedForm());
   const [saving, setSaving]       = useState(false);
@@ -68,6 +70,21 @@ export default function Inventory() {
     }
   };
 
+  // Quick ±1 stock adjustment — saves immediately (optimistic), reverts on error.
+  const adjustQty = async (item, delta) => {
+    const newQty = Math.max(0, (item.stockQuantity || 0) + delta);
+    if (newQty === item.stockQuantity) return;
+    setStock(prev => prev.map(s => s._id === item._id ? { ...s, stockQuantity: newQty } : s));
+    try {
+      await authFetch(`${API}/api/inventory/${item._id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ stockQuantity: newQty }),
+      });
+    } catch {
+      setStock(prev => prev.map(s => s._id === item._id ? { ...s, stockQuantity: item.stockQuantity } : s));
+    }
+  };
+
   const handleAddMedicine = async () => {
     setFormError('');
     if (!medForm.medicineName.trim()) { setFormError('Medicine name is required.'); return; }
@@ -96,14 +113,30 @@ export default function Inventory() {
     finally { setSaving(false); }
   };
 
-  const filtered = stock.filter(item =>
-    item.medicineName?.toLowerCase().includes(search.toLowerCase()) ||
-    item.brand?.toLowerCase().includes(search.toLowerCase()) ||
-    item.formulation?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = stock
+    .filter(item => {
+      const q = search.toLowerCase();
+      const matchesSearch = !q ||
+        item.medicineName?.toLowerCase().includes(q) ||
+        item.brand?.toLowerCase().includes(q) ||
+        item.formulation?.toLowerCase().includes(q);
+      if (!matchesSearch) return false;
+      const st = stockStatus(item);
+      if (statusFilter === 'in')  return st === 'In Stock';
+      if (statusFilter === 'low') return st === 'Low Stock';
+      if (statusFilter === 'out') return st === 'Out of Stock';
+      return true; // 'all'
+    })
+    .sort((a, b) => {
+      if (sortBy === 'lowfirst') return (a.stockQuantity || 0) - (b.stockQuantity || 0);
+      return (a.medicineName || '').localeCompare(b.medicineName || '');
+    });
 
   const totalItems    = stock.length;
-  const lowStockCount = stock.filter(i => stockStatus(i) !== 'In Stock').length;
+  const inCount       = stock.filter(i => stockStatus(i) === 'In Stock').length;
+  const lowCount      = stock.filter(i => stockStatus(i) === 'Low Stock').length;
+  const outCount      = stock.filter(i => stockStatus(i) === 'Out of Stock').length;
+  const lowStockCount = lowCount + outCount;
   const stockValue    = stock.reduce((s, i) => s + (i.stockQuantity || 0) * (i.price || 0), 0);
 
   return (
@@ -230,14 +263,16 @@ export default function Inventory() {
 
       {!showAdd && (
         <div className="dashboard-grid">
-          <div className="glass-panel stat-card" style={{ borderLeft: '4px solid var(--primary)' }}>
+          <div className="glass-panel stat-card" style={{ borderLeft: '4px solid var(--primary)', cursor: 'pointer', outline: statusFilter === 'all' ? '2px solid var(--primary)' : 'none' }}
+            onClick={() => setStatusFilter('all')} title="Show all medicines">
             <div className="stat-info">
               <div className="stat-label">Total Items Tracked</div>
               <div className="stat-value">{loading ? '—' : totalItems}</div>
             </div>
             <Pill size={40} color="var(--primary)" style={{ position: 'absolute', right: '20px', opacity: 0.2 }} />
           </div>
-          <div className="glass-panel stat-card" style={{ borderLeft: '4px solid var(--danger)' }}>
+          <div className="glass-panel stat-card" style={{ borderLeft: '4px solid var(--danger)', cursor: 'pointer', outline: (statusFilter === 'low' || statusFilter === 'out') ? '2px solid var(--danger)' : 'none' }}
+            onClick={() => setStatusFilter(outCount > 0 ? 'out' : 'low')} title="Show items needing attention">
             <div className="stat-info">
               <div className="stat-label">Low / Critical Stock</div>
               <div className="stat-value" style={{ color: 'var(--danger)' }}>{loading ? '—' : lowStockCount}</div>
@@ -256,6 +291,40 @@ export default function Inventory() {
 
       {!showAdd && (
         <div className="glass-panel">
+          {/* Filter chips (one tap to surface what needs attention) */}
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '12px' }}>
+            {[
+              { key: 'all', label: 'All', n: totalItems, color: 'var(--primary)', bg: 'var(--primary-light)' },
+              { key: 'in',  label: 'In stock', n: inCount, color: '#1a5c38', bg: '#d4edde' },
+              { key: 'low', label: 'Low', n: lowCount, color: '#b45309', bg: '#fef3c7' },
+              { key: 'out', label: 'Out', n: outCount, color: '#991b1b', bg: '#fee2e2' },
+            ].map(c => {
+              const active = statusFilter === c.key;
+              return (
+                <button key={c.key} onClick={() => setStatusFilter(c.key)} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '6px',
+                  padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600,
+                  border: `1.5px solid ${active ? c.color : 'var(--border-color)'}`,
+                  background: active ? c.bg : 'white', color: active ? c.color : 'var(--text-muted)',
+                }}>
+                  {c.label} <span style={{ fontSize: '0.72rem', opacity: 0.85 }}>{c.n}</span>
+                </button>
+              );
+            })}
+
+            {/* Sort toggle */}
+            <div style={{ marginLeft: 'auto', display: 'inline-flex', background: 'var(--bg-muted)', borderRadius: '10px', padding: '3px' }}>
+              {[{ k: 'name', l: 'Name' }, { k: 'lowfirst', l: 'Low first' }].map(o => (
+                <button key={o.k} onClick={() => setSortBy(o.k)} style={{
+                  padding: '6px 12px', border: 'none', borderRadius: '8px',
+                  background: sortBy === o.k ? 'var(--primary)' : 'transparent',
+                  color: sortBy === o.k ? '#fff' : 'var(--text-muted)',
+                  fontWeight: 500, fontSize: '0.78rem', cursor: 'pointer',
+                }}>{o.l}</button>
+              ))}
+            </div>
+          </div>
+
           <div style={{ display: 'flex', gap: '16px', marginBottom: '20px' }}>
             <div className="input-field" style={{ flex: 1, display: 'flex', alignItems: 'center', background: 'var(--bg-input)' }}>
               <Search size={20} color="var(--text-muted)" style={{ marginRight: '10px' }} />
@@ -318,6 +387,11 @@ export default function Inventory() {
                         <td>{item.formulation || '—'}</td>
                         <td>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <button onClick={() => adjustQty(item, -1)} disabled={item.stockQuantity === 0}
+                              title="Decrease by 1"
+                              style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'white', cursor: item.stockQuantity === 0 ? 'not-allowed' : 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, opacity: item.stockQuantity === 0 ? 0.4 : 1 }}>
+                              <Minus size={13} />
+                            </button>
                             <input
                               type="number" min="0"
                               value={editing ? editing.value : item.stockQuantity}
@@ -325,13 +399,18 @@ export default function Inventory() {
                               onBlur={() => handleQtyBlur(item)}
                               onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
                               style={{
-                                width: '70px', padding: '4px 8px', borderRadius: '6px',
+                                width: '64px', padding: '4px 8px', borderRadius: '6px',
                                 border: editing ? '1.5px solid #16a34a' : `1px solid ${isOut ? '#fecaca' : isLow ? '#fde68a' : 'var(--border-color)'}`,
                                 background: editing ? 'white' : isOut ? 'rgba(239,68,68,0.08)' : isLow ? 'rgba(245,158,11,0.08)' : 'var(--bg-input)',
                                 color: editing ? '#16a34a' : isOut ? '#ef4444' : isLow ? '#b45309' : 'inherit',
                                 fontWeight: 700, fontSize: '0.9rem', outline: 'none', textAlign: 'center',
                               }}
                             />
+                            <button onClick={() => adjustQty(item, 1)}
+                              title="Increase by 1"
+                              style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'white', cursor: 'pointer', color: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                              <Plus size={13} />
+                            </button>
                             {editing?.saving && <Loader2 size={13} className="animate-spin" color="#16a34a" />}
                             {editing?.saved  && <Check size={13} color="#16a34a" />}
                           </div>

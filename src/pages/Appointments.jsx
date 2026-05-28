@@ -1,14 +1,14 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Calendar, Clock, AlertTriangle, Plus, X,
-  Search, User, Phone, FileText,
-  Loader2, CheckCircle, Activity,
+  Search, Phone, FileText, Stethoscope,
+  Loader2, CheckCircle, CheckCircle2, RotateCcw,
   ChevronLeft, ChevronRight, XCircle,
-  Filter, RefreshCw,
 } from 'lucide-react';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
+import { AlertModal } from '../components/Modal.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const STATUS_COLORS = {
@@ -23,7 +23,15 @@ const STATUS_COLORS = {
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
-const toISO = (d) => d.toISOString().split('T')[0];
+// Local-time YYYY-MM-DD. (Do NOT use toISOString() here — it converts to UTC,
+// which in +offset timezones like IST shifts a local-midnight date back a day,
+// breaking date stepping and showing the wrong day.)
+const toISO = (d) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+};
 
 function getMonday(date) {
   const d = new Date(date);
@@ -35,321 +43,358 @@ function getMonday(date) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// DOCTOR VIEW — Week view with day sections, filters, cancel
+// DOCTOR VIEW — Single-day focus, one-click inline actions, auto-refresh
+// Goal: the doctor works the whole day without leaving the page or fiddling
+// with filter controls. Default = today; chips + search instead of dropdowns;
+// Start consult / Done / Cancel / Reopen act inline (optimistic updates).
 // ══════════════════════════════════════════════════════════════════════════════
+// One appointment row with inline actions.
+function ApptRow({ appt, busy, onConsult, onDone, onCancel, onReopen }) {
+  const sc = STATUS_COLORS[appt.status] || STATUS_COLORS.Waiting;
+  const isDone = appt.status === 'Completed' || appt.status === 'completed';
+  const isCancelled = appt.status === 'Cancelled' || appt.status === 'cancelled';
+  const ageGender = [appt.age, appt.gender?.[0]].filter(Boolean).join('');
+
+  return (
+    <div
+      style={{
+        background: 'white',
+        border: '1px solid var(--border-color)',
+        borderLeft: appt.isEmergency ? '4px solid #ef4444' : '1px solid var(--border-color)',
+        borderRadius: '10px', padding: '12px 16px',
+        display: 'flex', alignItems: 'center', gap: '14px',
+        opacity: isCancelled ? 0.65 : 1,
+      }}
+    >
+      {/* Token */}
+      <div style={{
+        width: '34px', height: '34px', borderRadius: '8px', flexShrink: 0,
+        background: 'var(--bg-muted)', border: '1px solid var(--border-color)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: 'var(--text-muted)', fontWeight: 700, fontSize: '0.76rem',
+      }}>#{appt.tokenNumber ?? '—'}</div>
+
+      {/* Patient info */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px', flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>{appt.patientName}</span>
+          {ageGender && <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>· {ageGender}</span>}
+          {appt.isEmergency && (
+            <span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.04em', color: '#991b1b', background: '#fee2e2', padding: '1px 7px', borderRadius: '4px' }}>EMERGENCY</span>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+          {appt.time && <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}><Clock size={11} /> {appt.time}</span>}
+          {appt.reason && <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}><FileText size={11} /> {appt.reason}</span>}
+        </div>
+      </div>
+
+      {/* Status badge */}
+      <span style={{ padding: '4px 12px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600, flexShrink: 0, background: sc.bg, color: sc.color }}>
+        {appt.status || 'Waiting'}
+      </span>
+
+      {/* Inline actions */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+        {busy ? (
+          <Loader2 size={16} className="animate-spin" style={{ color: 'var(--primary)' }} />
+        ) : isCancelled ? (
+          <button className="btn btn-outline" style={{ fontSize: '0.76rem', padding: '6px 10px' }} onClick={() => onReopen(appt)}>
+            <RotateCcw size={12} /> Reopen
+          </button>
+        ) : isDone ? (
+          <>
+            <span style={{ fontSize: '0.78rem', color: '#16a34a', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <CheckCircle size={14} /> Done
+            </span>
+            <button className="btn btn-outline" style={{ fontSize: '0.76rem', padding: '6px 10px' }} onClick={() => onConsult(appt)} title="Open chart">
+              <FileText size={12} /> Chart
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="btn btn-primary" style={{ fontSize: '0.78rem', padding: '7px 14px' }} onClick={() => onConsult(appt)}>
+              <Stethoscope size={13} /> Start consult
+            </button>
+            <button className="btn btn-outline" style={{ fontSize: '0.78rem', padding: '7px 10px' }} onClick={() => onDone(appt)} title="Mark completed">
+              <CheckCircle2 size={13} /> Done
+            </button>
+            <button
+              style={{ fontSize: '0.78rem', padding: '7px 8px', background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}
+              onClick={() => onCancel(appt)} title="Cancel appointment"
+            >
+              <XCircle size={13} />
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DoctorView() {
   const { authFetch } = useAuth();
   const navigate = useNavigate();
+
+  const [scope, setScope]               = useState('day');   // 'day' | 'week'
+  const [day, setDay]                   = useState(() => toISO(new Date()));
+  const [weekStart, setWeekStart]       = useState(() => getMonday(new Date()));
+  const [statusFilter, setStatusFilter] = useState('');
+  const [search, setSearch]             = useState('');
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading]           = useState(true);
-  const [weekStart, setWeekStart]       = useState(() => getMonday(new Date()));
-  const [filterDate, setFilterDate]     = useState(() => toISO(new Date()));
-  const [filterStatus, setFilterStatus] = useState('');
+  const [busyId, setBusyId]             = useState(null);     // row being mutated
+  const [confirmCancel, setConfirmCancel] = useState(null);   // appt pending cancel
+
+  const confirmOpenRef = useRef(false);
+  useEffect(() => { confirmOpenRef.current = !!confirmCancel; }, [confirmCancel]);
 
   const weekEnd = useMemo(() => {
-    const d = new Date(weekStart);
-    d.setDate(d.getDate() + 6);
-    d.setHours(23, 59, 59, 999);
-    return d;
+    const d = new Date(weekStart); d.setDate(d.getDate() + 6); d.setHours(23, 59, 59, 999); return d;
   }, [weekStart]);
 
+  const isTodaySelected = scope === 'day' && day === toISO(new Date());
+
+  // ── Fetch (range depends on scope) ──
   const fetchAppointments = useCallback(async () => {
     setLoading(true);
     try {
-      let url;
-      if (filterDate) {
-        url = `${API}/api/appointments?startDate=${filterDate}&endDate=${filterDate}`;
-      } else {
-        url = `${API}/api/appointments?startDate=${toISO(weekStart)}&endDate=${toISO(weekEnd)}`;
-      }
+      const url = scope === 'day'
+        ? `${API}/api/appointments?startDate=${day}&endDate=${day}&limit=500`
+        : `${API}/api/appointments?startDate=${toISO(weekStart)}&endDate=${toISO(weekEnd)}&limit=500`;
       const r = await authFetch(url);
       const data = await r.json();
       setAppointments(Array.isArray(data.appointments) ? data.appointments : Array.isArray(data) ? data : []);
     } catch { setAppointments([]); }
     finally { setLoading(false); }
-  }, [authFetch, weekStart, weekEnd, filterDate]);
+  }, [authFetch, scope, day, weekStart, weekEnd]);
 
   useEffect(() => { fetchAppointments(); }, [fetchAppointments]);
 
-  // Group appointments by ISO date string
+  // Auto-refresh every 45s (skip while a confirm dialog is open or tab hidden).
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (confirmOpenRef.current) return;
+      if (document.visibilityState !== 'visible') return;
+      fetchAppointments();
+    }, 45_000);
+    return () => clearInterval(id);
+  }, [fetchAppointments]);
+
+  // Status counts on the loaded set (drive the chips + day-shape summary).
+  const counts = useMemo(() => {
+    const c = { all: appointments.length, Waiting: 0, Scheduled: 0, Completed: 0, Cancelled: 0 };
+    appointments.forEach(a => { c[a.status] = (c[a.status] || 0) + 1; });
+    return c;
+  }, [appointments]);
+
+  // Sort: emergencies first, then by token, then by time.
+  const sortAppts = (arr) => [...arr].sort((a, b) => {
+    if (!!b.isEmergency !== !!a.isEmergency) return b.isEmergency ? 1 : -1;
+    if ((a.tokenNumber ?? 999) !== (b.tokenNumber ?? 999)) return (a.tokenNumber ?? 999) - (b.tokenNumber ?? 999);
+    return (a.time || '').localeCompare(b.time || '');
+  });
+
+  // Apply status + name filters.
+  const visible = useMemo(() => {
+    let list = appointments;
+    if (statusFilter) list = list.filter(a => a.status === statusFilter);
+    if (search.trim()) { const q = search.trim().toLowerCase(); list = list.filter(a => a.patientName?.toLowerCase().includes(q)); }
+    return list;
+  }, [appointments, statusFilter, search]);
+
+  // For week scope: group visible by day.
   const grouped = useMemo(() => {
     const groups = {};
-    const filtered = filterStatus
-      ? appointments.filter(a => a.status === filterStatus)
-      : appointments;
-    filtered.forEach(a => {
-      const day = new Date(a.date).toISOString().split('T')[0];
-      if (!groups[day]) groups[day] = [];
-      groups[day].push(a);
-    });
+    visible.forEach(a => { const d = toISO(new Date(a.date)); (groups[d] = groups[d] || []).push(a); });
     const today = toISO(new Date());
-    return Object.entries(groups).sort(([a], [b]) => {
-      if (a === today) return -1;
-      if (b === today) return 1;
-      return a.localeCompare(b);
-    });
-  }, [appointments, filterStatus]);
+    return Object.entries(groups)
+      .sort(([a], [b]) => (a === today ? -1 : b === today ? 1 : a.localeCompare(b)))
+      .map(([d, arr]) => [d, sortAppts(arr)]);
+  }, [visible]);
 
-  const totalShown = useMemo(() => grouped.reduce((acc, [, arr]) => acc + arr.length, 0), [grouped]);
-
-  // Actions
-  const handleCancel = async (id) => {
+  // ── Inline mutations (optimistic) ──
+  const patchStatus = async (appt, status) => {
+    setBusyId(appt._id);
+    const prev = appt.status;
+    setAppointments(list => list.map(a => a._id === appt._id ? { ...a, status } : a));
     try {
-      await authFetch(`${API}/api/appointments/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: 'Cancelled' }),
-      });
-      fetchAppointments();
-    } catch { alert('Failed to cancel appointment.'); }
+      const r = await authFetch(`${API}/api/appointments/${appt._id}`, { method: 'PUT', body: JSON.stringify({ status }) });
+      if (!r.ok) throw new Error();
+    } catch {
+      // revert on failure
+      setAppointments(list => list.map(a => a._id === appt._id ? { ...a, status: prev } : a));
+    } finally { setBusyId(null); }
   };
 
-  // Week navigation
-  const prevWeek = () => { setFilterDate(''); setWeekStart(d => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; }); };
-  const nextWeek = () => { setFilterDate(''); setWeekStart(d => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; }); };
-  const goThisWeek = () => { setFilterDate(''); setFilterStatus(''); setWeekStart(getMonday(new Date())); };
+  const onConsult = (appt) => navigate('/prescription', { state: { appointment: appt } });
+  const onDone    = (appt) => patchStatus(appt, 'Completed');
+  const onReopen  = (appt) => patchStatus(appt, 'Waiting');
+  const onCancel  = (appt) => setConfirmCancel(appt);
+  const doCancel  = () => { if (confirmCancel) { patchStatus(confirmCancel, 'Cancelled'); setConfirmCancel(null); } };
 
-  const isThisWeek = !filterDate && toISO(weekStart) === toISO(getMonday(new Date()));
+  // ── Navigation ──
+  const step = (dir) => {
+    if (scope === 'day') setDay(d => { const n = new Date(d + 'T00:00:00'); n.setDate(n.getDate() + dir); return toISO(n); });
+    else setWeekStart(d => { const n = new Date(d); n.setDate(n.getDate() + dir * 7); return n; });
+  };
+  const goToday = () => { setDay(toISO(new Date())); setWeekStart(getMonday(new Date())); };
 
-  const weekLabel = filterDate
-    ? new Date(filterDate + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  const dateLabel = scope === 'day'
+    ? new Date(day + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
     : `${weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} – ${weekEnd.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+
+  const STATUS_CHIPS = [
+    { key: '',          label: 'All',       n: counts.all },
+    { key: 'Waiting',   label: 'Waiting',   n: counts.Waiting },
+    { key: 'Scheduled', label: 'Scheduled', n: counts.Scheduled },
+    { key: 'Completed', label: 'Completed', n: counts.Completed },
+    { key: 'Cancelled', label: 'Cancelled', n: counts.Cancelled },
+  ];
 
   return (
     <div className="animate-fade-in">
-      {/* ── Sticky Header: title + week nav + filter bar ── */}
+      {/* ── Sticky header ── */}
       <div style={{ position: 'sticky', top: 0, zIndex: 20, background: 'var(--bg-dark)', paddingTop: '24px', paddingBottom: '12px' }}>
-        {/* Header Row */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px', flexWrap: 'wrap', gap: '12px' }}>
           <div>
             <h1 className="page-title">Appointments</h1>
-            <p className="page-subtitle">{weekLabel} &nbsp;•&nbsp; {totalShown} appointment{totalShown !== 1 ? 's' : ''}</p>
+            <p className="page-subtitle" style={{ margin: 0 }}>{dateLabel} · {visible.length} shown</p>
           </div>
 
-          {/* Week navigation */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button className="btn btn-outline" style={{ padding: '8px 14px', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.85rem' }} onClick={prevWeek}>
-              <ChevronLeft size={16} /> Prev Week
+          {/* Scope chips + date navigator */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'inline-flex', background: 'var(--bg-muted)', borderRadius: '10px', padding: '3px' }}>
+              {['day', 'week'].map(s => (
+                <button key={s} onClick={() => setScope(s)} style={{
+                  padding: '6px 14px', border: 'none', borderRadius: '8px',
+                  background: scope === s ? 'var(--primary)' : 'transparent',
+                  color: scope === s ? '#fff' : 'var(--text-muted)',
+                  fontWeight: 500, fontSize: '0.82rem', cursor: 'pointer', textTransform: 'capitalize',
+                }}>{s}</button>
+              ))}
+            </div>
+
+            <button className="btn btn-outline" style={{ padding: '8px 10px' }} onClick={() => step(-1)} title={scope === 'day' ? 'Previous day' : 'Previous week'}>
+              <ChevronLeft size={16} />
             </button>
-            <button
-              onClick={goThisWeek}
-              style={{
-                padding: '8px 16px', borderRadius: '8px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer',
-                border: `2px solid ${isThisWeek ? 'var(--primary)' : 'var(--border-color)'}`,
-                background: isThisWeek ? 'var(--primary)' : 'white',
-                color: isThisWeek ? 'white' : 'var(--text-main)',
-                transition: 'all 0.2s',
-              }}
-            >
-              This Week
-            </button>
-            <button className="btn btn-outline" style={{ padding: '8px 14px', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.85rem' }} onClick={nextWeek}>
-              Next Week <ChevronRight size={16} />
-            </button>
-            <button className="btn btn-outline" style={{ padding: '8px 10px', display: 'flex' }} onClick={fetchAppointments} title="Refresh">
-              <RefreshCw size={15} />
-            </button>
-          </div>
-        </div>
 
-        {/* ── Filter Bar ── */}
-        <div className="glass-panel" style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontWeight: 700, fontSize: '0.82rem', flexShrink: 0 }}>
-          <Filter size={14} /> Filters
-        </div>
-
-        {/* Single date picker */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 12px',
-          border: `1.5px solid ${filterDate ? '#86efac' : 'var(--border-color)'}`,
-          borderRadius: '8px', background: filterDate ? '#f0fdf4' : 'var(--bg-muted)', cursor: 'pointer',
-        }}>
-          <Calendar size={14} color={filterDate ? '#16a34a' : '#9ca3af'} />
-          <input
-            type="date"
-            value={filterDate}
-            onChange={e => { setFilterDate(e.target.value); }}
-            style={{ border: 'none', outline: 'none', background: 'transparent', fontSize: '0.83rem', color: filterDate ? '#16a34a' : 'var(--text-main)', cursor: 'pointer', fontWeight: filterDate ? 600 : 400 }}
-          />
-          {filterDate && (
-            <button onClick={() => setFilterDate('')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#9ca3af' }}>
-              <X size={13} />
-            </button>
-          )}
-        </div>
-
-        {/* Status filter */}
-        <CustomSelect
-          value={filterStatus}
-          onChange={setFilterStatus}
-          placeholder="All Statuses"
-          minWidth="150px"
-          options={[
-            { value: '', label: 'All Statuses' },
-            { value: 'Waiting',   label: 'Waiting',   color: '#92400e', bg: '#fef9ec' },
-            { value: 'Scheduled', label: 'Scheduled', color: '#1d4ed8', bg: '#eff6ff' },
-            { value: 'Completed', label: 'Completed', color: '#16a34a', bg: '#f0fdf4' },
-            { value: 'Cancelled', label: 'Cancelled', color: '#6b7280', bg: '#f9fafb' },
-          ]}
-        />
-
-        {(filterDate || filterStatus) && (
-          <button
-            onClick={() => { setFilterDate(''); setFilterStatus(''); }}
-            style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '7px 12px', background: '#fef2f2', border: '1.5px solid #fecaca', borderRadius: '8px', color: '#ef4444', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer' }}
-          >
-            <X size={13} /> Clear
-          </button>
-        )}
-
-        {/* Active filter tags */}
-        {filterDate && (
-          <span style={{ background: 'var(--bg-muted)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', padding: '3px 10px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600 }}>
-            {new Date(filterDate + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
-          </span>
-        )}
-        {filterStatus && (
-          <span style={{ background: STATUS_COLORS[filterStatus]?.bg, color: STATUS_COLORS[filterStatus]?.color, padding: '3px 10px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600 }}>
-            {filterStatus}
-          </span>
-        )}
-
-        <span style={{ marginLeft: 'auto', fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-          {totalShown} result{totalShown !== 1 ? 's' : ''}
-        </span>
-        </div>
-      </div>{/* end sticky header */}
-
-      {/* ── Content — only this scrolls ── */}
-      <div style={{ paddingTop: '16px' }}>
-      {loading ? (
-        <MedicalLoader text="Loading appointments…" />
-      ) : grouped.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '100px 0', color: '#9ca3af' }}>
-          <Calendar size={52} color="#e5e7eb" style={{ marginBottom: '14px' }} />
-          <div style={{ fontWeight: 700, fontSize: '1.05rem', marginBottom: '6px' }}>No appointments found</div>
-          <div style={{ fontSize: '0.85rem' }}>
-            {filterDate || filterStatus ? 'Try clearing the filters.' : 'No appointments scheduled for this week.'}
-          </div>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
-          {grouped.map(([day, dayAppts]) => {
-            const dateObj = new Date(day + 'T00:00:00');
-            const isToday = day === toISO(new Date());
-
-            return (
-              <div key={day}>
-                {/* Day section header */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                    <Calendar size={13} color="var(--text-muted)" />
-                    <span style={{ fontWeight: 700, fontSize: '0.85rem', color: isToday ? 'var(--primary)' : 'var(--text-main)' }}>
-                      {dateObj.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
-                    </span>
-                    {isToday && (
-                      <span style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--primary)', background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '1px 8px', borderRadius: '20px' }}>
-                        Today
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ height: '1px', flex: 1, background: 'var(--border-color)' }} />
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 500, flexShrink: 0 }}>
-                    {dayAppts.length} appointment{dayAppts.length !== 1 ? 's' : ''}
-                  </span>
-                </div>
-
-                {/* Appointment cards for this day */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {dayAppts.map(appt => {
-                    const sc = STATUS_COLORS[appt.status] || STATUS_COLORS.Waiting;
-                    const isDone = appt.status === 'Completed' || appt.status === 'completed';
-                    const isCancelled = appt.status === 'Cancelled' || appt.status === 'cancelled';
-                    return (
-                    <div
-                      key={appt._id}
-                      style={{
-                        background: 'white',
-                        border: '1px solid var(--border-color)',
-                        borderRadius: '10px', padding: '14px 18px',
-                        display: 'flex', alignItems: 'center', gap: '14px',
-                        opacity: isCancelled ? 0.7 : 1,
-                        transition: 'box-shadow 0.2s',
-                      }}
-                      onMouseEnter={e => e.currentTarget.style.boxShadow = '0 2px 10px rgba(0,0,0,0.07)'}
-                      onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
-                    >
-                      {/* Token */}
-                      <div style={{
-                        width: '36px', height: '36px', borderRadius: '8px', flexShrink: 0,
-                        background: 'var(--bg-muted)', border: '1px solid var(--border-color)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        color: 'var(--text-muted)', fontWeight: 700, fontSize: '0.78rem',
-                      }}>
-                        #{appt.tokenNumber}
-                      </div>
-
-                      {/* Patient info */}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
-                          <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>
-                            {appt.patientName}
-                          </span>
-                          {appt.isEmergency && (
-                            <span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.04em', color: '#991b1b', background: '#fee2e2', padding: '1px 7px', borderRadius: '4px' }}>
-                              EMERGENCY
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                          {appt.time && <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}><Clock size={11} /> {appt.time}</span>}
-                          {appt.reason && <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}><FileText size={11} /> {appt.reason}</span>}
-                        </div>
-                      </div>
-
-                      {/* Status badge */}
-                      <span style={{
-                        padding: '4px 12px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600, flexShrink: 0,
-                        background: sc.bg, color: sc.color,
-                      }}>
-                        {appt.status || 'Waiting'}
-                      </span>
-
-                      {/* Actions */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                        {!isDone && !isCancelled && (
-                          <button
-                            className="btn btn-primary"
-                            style={{ padding: '7px 16px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '5px' }}
-                            onClick={() => navigate('/prescription', { state: { appointment: appt } })}
-                          >
-                            <Activity size={13} /> Consult
-                          </button>
-                        )}
-                        {isDone && (
-                          <span style={{ fontSize: '0.78rem', color: '#16a34a', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            <CheckCircle size={14} /> Done
-                          </span>
-                        )}
-                        {!isDone && !isCancelled && (
-                          <button
-                            className="btn btn-outline"
-                            onClick={() => handleCancel(appt._id)}
-                            style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', padding: '7px 12px' }}
-                          >
-                            <XCircle size={13} /> Cancel
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    );
-                  })}
-                </div>
+            {scope === 'day' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'var(--bg-input)', border: '1.5px solid var(--border-color)', borderRadius: '10px', padding: '6px 12px' }}>
+                <Calendar size={15} color="var(--primary)" />
+                <input type="date" value={day} max={toISO(new Date())} onChange={e => e.target.value && setDay(e.target.value)}
+                  style={{ border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-main)', fontSize: '0.84rem', cursor: 'pointer', fontFamily: 'var(--font-primary)' }} />
               </div>
+            )}
+
+            <button
+              className="btn btn-outline"
+              style={{ padding: '8px 10px', opacity: (scope === 'day' && isTodaySelected) ? 0.45 : 1 }}
+              onClick={() => step(1)}
+              disabled={scope === 'day' && isTodaySelected}
+              title={scope === 'day' ? 'Next day' : 'Next week'}
+            >
+              <ChevronRight size={16} />
+            </button>
+
+            {!isTodaySelected && (
+              <button className="btn btn-primary" style={{ fontSize: '0.82rem', padding: '8px 14px' }} onClick={goToday}>
+                <RotateCcw size={14} /> Today
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Status chips (day-shape summary) + name search */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {STATUS_CHIPS.map(c => {
+            const active = statusFilter === c.key;
+            const col = c.key ? STATUS_COLORS[c.key] : null;
+            return (
+              <button key={c.key || 'all'} onClick={() => setStatusFilter(c.key)} style={{
+                display: 'inline-flex', alignItems: 'center', gap: '6px',
+                padding: '6px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600,
+                border: `1.5px solid ${active ? (col?.color || 'var(--primary)') : 'var(--border-color)'}`,
+                background: active ? (col?.bg || 'var(--primary-light)') : 'white',
+                color: active ? (col?.color || 'var(--primary)') : 'var(--text-muted)',
+              }}>
+                {c.label}
+                <span style={{ fontSize: '0.72rem', opacity: 0.8 }}>{c.n}</span>
+              </button>
             );
           })}
+
+          <div style={{ position: 'relative', marginLeft: 'auto', display: 'flex', alignItems: 'center' }}>
+            <Search size={14} color="#9ca3af" style={{ position: 'absolute', left: '10px' }} />
+            <input
+              type="text" placeholder="Search patient…" value={search} onChange={e => setSearch(e.target.value)}
+              style={{ padding: '7px 28px 7px 30px', border: `1.5px solid ${search ? 'var(--primary)' : 'var(--border-color)'}`, borderRadius: '8px', fontSize: '0.82rem', outline: 'none', background: 'white', width: '190px', color: 'var(--text-main)' }}
+            />
+            {search && (
+              <button onClick={() => setSearch('')} style={{ position: 'absolute', right: '8px', background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', padding: 0 }}>
+                <X size={13} />
+              </button>
+            )}
+          </div>
         </div>
-      )}
-      </div>{/* end scrollable content */}
+      </div>
+
+      {/* ── Content ── */}
+      <div style={{ paddingTop: '16px' }}>
+        {loading ? (
+          <MedicalLoader text="Loading appointments…" />
+        ) : visible.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '80px 0', color: '#9ca3af' }}>
+            <Calendar size={48} color="#e5e7eb" style={{ marginBottom: '14px' }} />
+            <div style={{ fontWeight: 700, fontSize: '1.02rem', marginBottom: '6px' }}>No appointments {scope === 'day' ? 'on this day' : 'this week'}</div>
+            <div style={{ fontSize: '0.85rem' }}>{statusFilter || search ? 'Try clearing the status chip or search.' : 'Use ◀ ▶ to browse other days.'}</div>
+          </div>
+        ) : scope === 'day' ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {sortAppts(visible).map(appt => (
+              <ApptRow key={appt._id} appt={appt} busy={busyId === appt._id}
+                onConsult={onConsult} onDone={onDone} onCancel={onCancel} onReopen={onReopen} />
+            ))}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
+            {grouped.map(([d, dayAppts]) => {
+              const dObj = new Date(d + 'T00:00:00');
+              const isToday = d === toISO(new Date());
+              return (
+                <div key={d}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                    <Calendar size={13} color="var(--text-muted)" />
+                    <span style={{ fontWeight: 700, fontSize: '0.85rem', color: isToday ? 'var(--primary)' : 'var(--text-main)' }}>
+                      {dObj.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}
+                    </span>
+                    {isToday && <span style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--primary)', background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '1px 8px', borderRadius: '20px' }}>Today</span>}
+                    <div style={{ height: '1px', flex: 1, background: 'var(--border-color)' }} />
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', flexShrink: 0 }}>{dayAppts.length}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {dayAppts.map(appt => (
+                      <ApptRow key={appt._id} appt={appt} busy={busyId === appt._id}
+                        onConsult={onConsult} onDone={onDone} onCancel={onCancel} onReopen={onReopen} />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Cancel confirmation */}
+      <AlertModal
+        isOpen={!!confirmCancel}
+        onClose={() => setConfirmCancel(null)}
+        title="Cancel appointment?"
+        message={confirmCancel ? `Cancel ${confirmCancel.patientName}'s appointment? You can reopen it afterwards if needed.` : ''}
+        type="danger"
+        showConfirm
+        onConfirm={doCancel}
+      />
     </div>
   );
 }
