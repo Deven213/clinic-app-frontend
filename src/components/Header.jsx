@@ -6,6 +6,14 @@ import { useAuth } from '../context/AuthContext.jsx';
 const AVATAR_KEY = (uid) => `ayurclinic_avatar_${uid}`;
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
+// ── Persistent "dismissed notification" set (localStorage) ───────────────────
+// IDs are state-aware (e.g. include count / stockQty / status) so the *same*
+// notification stays hidden, but a *different* underlying state generates a
+// new ID and the doctor sees a fresh alert.
+const DISMISSED_KEY = 'medicore_dismissed_notifs';
+const readDismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY)) || []); } catch { return new Set(); } };
+const writeDismissed = (set) => { try { localStorage.setItem(DISMISSED_KEY, JSON.stringify([...set])); } catch {} };
+
 export default function Header({ onMenuClick }) {
   const { user, logout, authFetch } = useAuth();
   const navigate = useNavigate();
@@ -55,7 +63,12 @@ export default function Header({ onMenuClick }) {
 
   const clearSearch = () => { setSearchQuery(''); setSearchResults([]); setShowSearch(false); };
 
-  // Build notifications from: today's appointments + low/out stock + overdue follow-ups
+  // Persisted dismissed-IDs across sessions (filters out already-acknowledged alerts).
+  const [dismissed, setDismissed] = useState(() => readDismissed());
+
+  // Build notifications from: today's appointments + low/out stock + overdue follow-ups.
+  // Each notif gets a stable, *state-aware* id (so a new value generates a new id)
+  // plus a `link` route that opens the relevant page on click.
   const fetchNotifications = useCallback(async () => {
     setNotifLoading(true);
     const notifs = [];
@@ -70,10 +83,14 @@ export default function Header({ onMenuClick }) {
         const waiting   = appts.filter(a => a.status === 'Waiting'   || a.status === 'pending');
         const scheduled = appts.filter(a => a.status === 'Scheduled');
         if (waiting.length > 0) notifs.push({
-          id: 'appt-waiting', text: `${waiting.length} patient${waiting.length > 1 ? 's' : ''} waiting in queue`, time: 'Today', type: 'warning',
+          id: `appt-waiting-${waiting.length}`,
+          text: `${waiting.length} patient${waiting.length > 1 ? 's' : ''} waiting in queue`,
+          time: 'Today', type: 'warning', link: '/appointments',
         });
         if (scheduled.length > 0) notifs.push({
-          id: 'appt-scheduled', text: `${scheduled.length} appointment${scheduled.length > 1 ? 's' : ''} scheduled today`, time: 'Today', type: 'info',
+          id: `appt-scheduled-${scheduled.length}`,
+          text: `${scheduled.length} appointment${scheduled.length > 1 ? 's' : ''} scheduled today`,
+          time: 'Today', type: 'info', link: '/appointments',
         });
       }
     } catch {}
@@ -85,10 +102,14 @@ export default function Header({ onMenuClick }) {
         const inv = await r.json();
         if (Array.isArray(inv)) {
           inv.filter(i => i.stockQuantity === 0).slice(0, 2).forEach(i => notifs.push({
-            id: `out-${i._id}`, text: `Out of stock: ${i.medicineName}`, time: 'Inventory', type: 'danger',
+            id: `out-${i._id}`,                        // stable per medicine — clears when restocked
+            text: `Out of stock: ${i.medicineName}`,
+            time: 'Inventory', type: 'danger', link: '/inventory',
           }));
           inv.filter(i => i.stockQuantity > 0 && i.stockQuantity <= (i.lowStockThreshold || 10)).slice(0, 3).forEach(i => notifs.push({
-            id: `low-${i._id}`, text: `Low stock: ${i.medicineName} (${i.stockQuantity} left)`, time: 'Inventory', type: 'warning',
+            id: `low-${i._id}-${i.stockQuantity}`,    // includes qty → fresh notif if it drops further
+            text: `Low stock: ${i.medicineName} (${i.stockQuantity} left)`,
+            time: 'Inventory', type: 'warning', link: '/inventory',
           }));
         }
       }
@@ -101,7 +122,9 @@ export default function Header({ onMenuClick }) {
         const data = await r.json();
         const fus = Array.isArray(data) ? data : (Array.isArray(data.followups) ? data.followups : []);
         fus.slice(0, 3).forEach(f => notifs.push({
-          id: `fu-${f._id}`, text: `Overdue follow-up: ${f.patientName}`, time: 'Follow-up', type: 'danger',
+          id: `fu-${f._id}`,                          // stable per follow-up — clears when marked Done/Called
+          text: `Overdue follow-up: ${f.patientName}`,
+          time: 'Follow-up', type: 'danger', link: '/follow-ups',
         }));
       }
     } catch {}
@@ -126,7 +149,33 @@ export default function Header({ onMenuClick }) {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleMarkAllAsRead = () => { setNotifications([]); setShowNotifications(false); };
+  // Visible = generated notifs minus those the doctor has dismissed.
+  const visibleNotifications = notifications.filter(n => !dismissed.has(n.id));
+
+  // Persistent mark-all-as-read: add every current visible id to dismissed set.
+  const handleMarkAllAsRead = () => {
+    const next = new Set(dismissed);
+    visibleNotifications.forEach(n => next.add(n.id));
+    setDismissed(next);
+    writeDismissed(next);
+    setShowNotifications(false);
+  };
+
+  // Individual dismiss — used by the X on each row. Persists.
+  const dismissOne = (id) => {
+    const next = new Set(dismissed);
+    next.add(id);
+    setDismissed(next);
+    writeDismissed(next);
+  };
+
+  // Click a notification → navigate to the relevant page AND dismiss it.
+  const openNotification = (notif) => {
+    if (notif?.link) navigate(notif.link);
+    if (notif?.id)   dismissOne(notif.id);
+    setShowNotifications(false);
+  };
+
   const handleLogout = async () => { await logout(); navigate('/login'); };
 
   const displayName = user?.displayName || user?.email?.split('@')[0] || 'Doctor';
@@ -225,14 +274,14 @@ export default function Header({ onMenuClick }) {
         <div style={{ position: 'relative' }} ref={dropdownRef}>
           <button style={{ position: 'relative' }} onClick={() => setShowNotifications(!showNotifications)}>
             <Bell size={20} color="var(--text-main)" />
-            {notifications.length > 0 && (
+            {visibleNotifications.length > 0 && (
               <span style={{
                 position: 'absolute', top: '-4px', right: '-4px',
                 background: 'var(--danger)', color: 'white',
                 width: '16px', height: '16px', borderRadius: '50%',
                 fontSize: '0.6rem', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>
-                {notifications.length > 9 ? '9+' : notifications.length}
+                {visibleNotifications.length > 9 ? '9+' : visibleNotifications.length}
               </span>
             )}
           </button>
@@ -247,9 +296,9 @@ export default function Header({ onMenuClick }) {
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingBottom: '8px', borderBottom: '1px solid var(--border-color)' }}>
                 <span style={{ fontWeight: 700, fontSize: '1rem', flex: 1 }}>Notifications</span>
-                {notifications.length > 0 && (
+                {visibleNotifications.length > 0 && (
                   <span style={{ fontSize: '0.75rem', background: '#fef2f2', color: '#ef4444', padding: '2px 8px', borderRadius: '20px' }}>
-                    {notifications.length}
+                    {visibleNotifications.length}
                   </span>
                 )}
                 <button
@@ -263,19 +312,45 @@ export default function Header({ onMenuClick }) {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto' }}>
-                {notifLoading && notifications.length === 0 ? (
+                {notifLoading && visibleNotifications.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
                     Checking for alerts…
                   </div>
-                ) : notifications.length > 0 ? notifications.map(notif => (
-                  <div key={notif.id} style={{ display: 'flex', flexDirection: 'column', gap: '3px', padding: '8px 10px', background: 'var(--bg-muted)', borderRadius: '8px', borderLeft: `3px solid ${notifColor(notif.type)}` }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-main)' }}>{notif.text}</div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>{notif.time}</div>
+                ) : visibleNotifications.length > 0 ? visibleNotifications.map(notif => (
+                  <div
+                    key={notif.id}
+                    onClick={() => openNotification(notif)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      padding: '8px 10px', background: 'var(--bg-muted)', borderRadius: '8px',
+                      borderLeft: `3px solid ${notifColor(notif.type)}`,
+                      cursor: notif.link ? 'pointer' : 'default',
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#eef2f7'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-muted)'}
+                    title={notif.link ? 'Click to open' : ''}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-main)' }}>{notif.text}</div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>{notif.time}</div>
+                    </div>
+                    {/* Individual dismiss — stopPropagation so the parent click doesn't fire */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); dismissOne(notif.id); }}
+                      title="Dismiss this notification"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px', display: 'flex', flexShrink: 0 }}
+                    >
+                      <X size={14} />
+                    </button>
                   </div>
-                )) : null}
+                )) : (
+                  <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
+                    All clear — no alerts.
+                  </div>
+                )}
               </div>
 
-              {notifications.length > 0 && (
+              {visibleNotifications.length > 0 && (
                 <button className="btn btn-outline" style={{ width: '100%', padding: '6px', fontSize: '0.82rem' }} onClick={handleMarkAllAsRead}>
                   Mark all as read
                 </button>

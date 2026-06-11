@@ -45,20 +45,10 @@ function App() {
                     <Route path="/patients" element={<Patients />} />
                     <Route path="/patients/:id/history" element={<PatientHistory />} />
 
-                    {/* Doctor only */}
-                    <Route path="/prescription" element={
-                      <RoleRoute allow={['Doctor']}>
-                        <Prescription />
-                      </RoleRoute>
-                    } />
-                    <Route path="/diseases" element={
-                      <RoleRoute allow={['Doctor']}>
-                        <DiseaseManager />
-                      </RoleRoute>
-                    } />
-
-                    {/* All roles */}
-                    <Route path="/billing" element={<Billing />} />
+                    {/* All roles — Receptionist now has full feature parity with Doctor */}
+                    <Route path="/prescription" element={<Prescription />} />
+                    <Route path="/diseases"     element={<DiseaseManager />} />
+                    <Route path="/billing"      element={<Billing />} />
                     <Route path="/inventory" element={<Inventory />} />
                     <Route path="/follow-ups" element={<FollowUp />} />
                     <Route path="/profile" element={<Profile />} />

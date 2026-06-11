@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Search, Plus, Phone, History, Loader2, X, User,
-  Stethoscope, CalendarClock,
+  Stethoscope, CalendarClock, IndianRupee,
 } from 'lucide-react';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import Modal from '../components/Modal.jsx';
@@ -148,6 +148,11 @@ export default function Patients() {
   const newRx = (p) =>
     navigate('/prescription', { state: { appointment: { patientId: p._id || p.id, patientName: p.name, reason: '' } } });
 
+  // One-click: open Create Receipt with this patient pre-selected so the
+  // form auto-loads their latest prescription items + prices from inventory.
+  const newBill = (p) =>
+    navigate('/billing', { state: { newReceiptForPatient: { _id: p._id || p.id, name: p.name, age: p.age, gender: p.gender, contact: p.contact || p.phone } } });
+
   return (
     <div className="animate-fade-in" style={{ height: 'calc(100vh - var(--header-height) - 28px)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
@@ -281,6 +286,13 @@ export default function Patients() {
                           <button className="btn btn-primary" style={{ fontSize: '0.78rem', padding: '7px 12px', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => newRx(p)}>
                             <Stethoscope size={13} /> New Rx
                           </button>
+                          {/* Bill option appears only when the consultation is done
+                              (i.e. a prescription has been written for this patient). */}
+                          {p.lastPrescription && (
+                            <button className="btn btn-outline" style={{ fontSize: '0.78rem', padding: '7px 12px', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => newBill(p)} title="Create a bill for this patient">
+                              <IndianRupee size={13} /> Bill
+                            </button>
+                          )}
                           <button className="btn btn-outline" style={{ fontSize: '0.78rem', padding: '7px 12px', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => navigate(`/patients/${p._id || p.id}/history`)}>
                             <History size={13} /> History
                           </button>
