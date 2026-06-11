@@ -6,14 +6,16 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
-// roles: undefined = visible to all; array = only those roles can see it
+// Receptionist now has full feature parity with Doctor — all nav items are
+// visible to both roles. The `roles` key is kept as a hook for future
+// role-gating, but no item uses it currently.
 const navItems = [
   { path: '/dashboard',   label: 'Dashboard',         icon: LayoutDashboard },
   { path: '/appointments',label: 'Appointments',       icon: Calendar },
   { path: '/patients',    label: 'Patients',           icon: Users },
-  { path: '/prescription',label: 'Prescriptions',      icon: FileEdit,   roles: ['Doctor'] },
-  { path: '/inventory',   label: 'Medicine Inventory', icon: Pill,         roles: ['Doctor'] },
-  { path: '/billing',     label: 'Billing & Payments', icon: IndianRupee,  roles: ['Doctor'] },
+  { path: '/prescription',label: 'Prescriptions',      icon: FileEdit },
+  { path: '/inventory',   label: 'Medicine Inventory', icon: Pill },
+  { path: '/billing',     label: 'Billing & Payments', icon: IndianRupee },
   { path: '/follow-ups',  label: 'Follow-ups',         icon: Clock },
   { path: '/service',     label: 'Help & Support',     icon: HeadphonesIcon },
 ];

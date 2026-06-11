@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   IndianRupee, FileText, CheckCircle, Search,
   Loader2, RefreshCw, AlertCircle, Plus, X, Trash2, User,
-  QrCode, MessageCircle, Copy, CheckCheck, Wifi,
+  QrCode, MessageCircle, Copy, CheckCheck, Wifi, ArrowLeft,
 } from 'lucide-react';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
@@ -10,7 +11,22 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 const fmt = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
-const emptyItem = () => ({ id: Date.now() + Math.random(), description: '', amount: '' });
+const emptyItem = () => ({ id: Date.now() + Math.random(), description: '', qty: 1, unitPrice: '' });
+// Per-line amount = quantity × unit price
+const lineAmount = (i) => (Number(i.qty) || 0) * (Number(i.unitPrice) || 0);
+
+// ── Recently-selected patients (persisted locally) ─────────────────────────────
+const RECENT_KEY = 'medicore_recent_patients';
+const readRecent = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY)) || []; } catch { return []; } };
+const pushRecent = (p) => {
+  try {
+    const id = p._id || p.id;
+    const entry = { _id: id, name: p.name, age: p.age, gender: p.gender, contact: p.contact || p.phone };
+    const next = [entry, ...readRecent().filter(x => (x._id || x.id) !== id)].slice(0, 8);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+    return next;
+  } catch { return readRecent(); }
+};
 
 // ── UPI payment helpers ───────────────────────────────────────────────────────
 const CLINIC_UPI  = 'clinic@upi';
@@ -110,12 +126,51 @@ function PaymentQRModal({ bill, onClose, onPaid, authFetch }) {
 }
 
 // ─── Inline Create Receipt Form ───────────────────────────────────────────────
-function CreateReceiptForm({ onClose, onSaved, authFetch }) {
+function CreateReceiptForm({ onClose, onSaved, authFetch, prefillPatient }) {
   const [patientQuery, setPatientQuery]       = useState('');
   const [patientSuggestions, setSuggestions]  = useState([]);
   const [searching, setSearching]             = useState(false);
   const [selectedPatient, setSelectedPatient] = useState(null);
+  const [recentPatients, setRecentPatients]   = useState([]);
+  const [showDropdown, setShowDropdown]       = useState(false);
   const isNewPatient = patientQuery.trim().length > 1 && !selectedPatient;
+
+  // Load recent patients = recently selected (localStorage) + recently added (DB),
+  // deduped. Shown when the field is focused and empty.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const local = readRecent();
+      let dbRecent = [];
+      try {
+        const r = await authFetch(`${API}/api/patients?limit=8`);
+        const data = await r.json();
+        dbRecent = Array.isArray(data.patients) ? data.patients : Array.isArray(data) ? data : [];
+      } catch { /* ignore */ }
+      if (!alive) return;
+      const seen = new Set();
+      const merged = [];
+      [...local, ...dbRecent].forEach(p => {
+        const id = p._id || p.id;
+        if (id && !seen.has(id)) { seen.add(id); merged.push(p); }
+      });
+      setRecentPatients(merged.slice(0, 8));
+    })();
+    return () => { alive = false; };
+  }, [authFetch]);
+
+  // If we were opened from Patient Records with a pre-selected patient,
+  // simulate the same flow as picking them from the dropdown — set the
+  // input, remember them, and auto-load their latest prescription items.
+  useEffect(() => {
+    if (prefillPatient && prefillPatient._id) {
+      setPatientQuery(prefillPatient.name || '');
+      setSelectedPatient({ _id: prefillPatient._id, name: prefillPatient.name });
+      setRecentPatients(pushRecent(prefillPatient));
+      loadPatientItems(prefillPatient._id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [items, setItems]               = useState([emptyItem()]);
   const [billType, setBillType]         = useState('Consultation');
@@ -125,13 +180,21 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
   const [saving, setSaving]             = useState(false);
   const [error, setError]               = useState('');
   const [success, setSuccess]           = useState(false);
+  const [taxPercent, setTaxPercent]     = useState(0);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [autoNote, setAutoNote]         = useState('');
 
-  const totalAmount = items.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  // Totals recompute on every render — instantly reflect add/remove/edit.
+  const subtotal    = items.reduce((s, i) => s + lineAmount(i), 0);
+  const taxAmount   = subtotal * (Number(taxPercent) || 0) / 100;
+  const grandTotal  = subtotal + taxAmount;
+  const totalAmount = grandTotal; // value saved to the backend
 
   const searchPatient = async (q) => {
     setPatientQuery(q);
     setSelectedPatient(null);
-    if (q.trim().length < 2) { setSuggestions([]); return; }
+    setShowDropdown(true);
+    if (q.trim().length < 1) { setSuggestions([]); return; }
     setSearching(true);
     try {
       const r = await authFetch(`${API}/api/patients/search?q=${encodeURIComponent(q)}`);
@@ -145,12 +208,64 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
     setPatientQuery(p.name);
     setSelectedPatient({ _id: p._id || p.id, name: p.name });
     setSuggestions([]);
+    setShowDropdown(false);
+    setRecentPatients(pushRecent(p));   // remember as recently selected
+    loadPatientItems(p._id || p.id);
+  };
+
+  // Auto-fill Line Items from the patient's latest prescription, pricing each
+  // medicine from inventory. The doctor can review/edit/remove before saving.
+  const loadPatientItems = async (patientId) => {
+    if (!patientId) return;
+    setLoadingItems(true);
+    setAutoNote('');
+    try {
+      const [rxRes, invRes] = await Promise.all([
+        authFetch(`${API}/api/prescriptions?patientId=${patientId}`),
+        authFetch(`${API}/api/inventory`),
+      ]);
+      const rxList = rxRes.ok ? await rxRes.json() : [];
+      const inv    = invRes.ok ? await invRes.json() : [];
+      const invArr = Array.isArray(inv) ? inv : (inv.items || inv.medicines || []);
+
+      // name (lowercased) → price lookup
+      const priceMap = {};
+      invArr.forEach(m => { if (m.medicineName) priceMap[m.medicineName.trim().toLowerCase()] = m.price; });
+
+      const latest = Array.isArray(rxList) && rxList.length ? rxList[0] : null;
+      const meds   = latest?.medicines || [];
+      if (meds.length === 0) {
+        setAutoNote('No previous prescription found for this patient — add line items manually.');
+        return;
+      }
+
+      const newItems = meds.map((m, idx) => ({
+        id: Date.now() + idx,
+        description: m.name || '',
+        qty: 1,
+        unitPrice: priceMap[(m.name || '').trim().toLowerCase()] ?? '',
+      }));
+      setItems(newItems);
+      setBillType('Medicine');
+      const needPrice = newItems.filter(i => i.unitPrice === '' || i.unitPrice == null).length;
+      setAutoNote(
+        `Loaded ${newItems.length} item(s) from the latest prescription` +
+        (latest?.diagnosis ? ` (${latest.diagnosis})` : '') + '. ' +
+        (needPrice > 0 ? `${needPrice} item(s) had no inventory price — please enter manually.` : 'Review and save.')
+      );
+    } catch {
+      setAutoNote('Could not load prescribed items — add them manually.');
+    } finally {
+      setLoadingItems(false);
+    }
   };
 
   const clearPatient = () => {
     setPatientQuery('');
     setSelectedPatient(null);
     setSuggestions([]);
+    setItems([emptyItem()]);
+    setAutoNote('');
   };
 
   const updateItem = (id, field, val) =>
@@ -182,8 +297,8 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
       }
 
       const validItems = items
-        .filter(i => i.description.trim() && Number(i.amount) > 0)
-        .map(i => ({ description: i.description.trim(), amount: Number(i.amount) }));
+        .filter(i => i.description.trim() && lineAmount(i) > 0)
+        .map(i => ({ description: i.description.trim(), amount: lineAmount(i) }));
 
       const br = await authFetch(`${API}/api/billing`, {
         method: 'POST',
@@ -225,6 +340,16 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
 
         {/* ── form ───────────────────────────────────────────────────────────── */}
         <div style={{ padding: '28px 32px', overflowY: 'auto', maxHeight: '78vh' }}>
+
+          {/* Back to records */}
+          <button
+            onClick={onClose}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600, padding: 0, marginBottom: '16px' }}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--primary)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
+          >
+            <ArrowLeft size={16} /> Back to records
+          </button>
 
           {/* Header row */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
@@ -273,9 +398,11 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
                     <input
                       className="input-field"
                       style={{ paddingLeft: '34px', paddingRight: selectedPatient ? '34px' : '12px', borderColor: selectedPatient ? '#86efac' : isNewPatient ? '#bfdbfe' : undefined }}
-                      placeholder="Search existing or type new name..."
+                      placeholder="Click to see recent patients, or type a name..."
                       value={patientQuery}
                       onChange={e => searchPatient(e.target.value)}
+                      onFocus={() => setShowDropdown(true)}
+                      onBlur={() => setTimeout(() => setShowDropdown(false), 180)}
                       autoComplete="off"
                     />
                     {searching && <Loader2 size={14} className="animate-spin" style={{ position: 'absolute', right: '11px', top: '50%', transform: 'translateY(-50%)', color: '#16a34a' }} />}
@@ -285,25 +412,43 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
                       </button>
                     )}
                   </div>
-                  {patientSuggestions.length > 0 && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, maxHeight: '180px', overflowY: 'auto', padding: '4px', marginTop: '2px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)' }}>
-                      {patientSuggestions.map(p => (
-                        <div key={p._id || p.id} onClick={() => selectPatient(p)}
-                          style={{ padding: '9px 12px', cursor: 'pointer', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-                          onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
-                          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                        >
-                          <div>
-                            <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>{p.name}</div>
-                            <div style={{ fontSize: '0.73rem', color: '#6b7280', marginTop: '1px' }}>
-                              {p.age ? `${p.age}y` : ''}{p.age && p.gender ? ' • ' : ''}{p.gender || ''}{p.contact ? ` • ${p.contact}` : ''}
-                            </div>
+                  {showDropdown && (() => {
+                    const q = patientQuery.trim();
+                    const isRecentMode = !q;
+                    const list = q ? patientSuggestions : recentPatients;
+                    return (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 1000, maxHeight: '280px', overflowY: 'auto', padding: '4px', marginTop: '4px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 6px 24px rgba(0,0,0,0.15)' }}>
+                        {isRecentMode && (
+                          <div style={{ padding: '8px 12px 4px', fontSize: '0.66rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            Recent patients
                           </div>
-                          <span style={{ fontSize: '0.7rem', background: '#f0fdf4', color: '#16a34a', padding: '2px 8px', borderRadius: '10px', fontWeight: 700 }}>Existing</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                        )}
+                        {list.length === 0 ? (
+                          <div style={{ padding: '14px', fontSize: '0.82rem', color: '#94a3b8', textAlign: 'center' }}>
+                            {isRecentMode
+                              ? (recentPatients.length === 0 ? 'Loading recent patients… or start typing to search.' : '')
+                              : (searching ? 'Searching…' : 'No patients match.')}
+                          </div>
+                        ) : (
+                          list.map(p => (
+                            <div key={p._id || p.id} onMouseDown={() => selectPatient(p)}
+                              style={{ padding: '9px 12px', cursor: 'pointer', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                              onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
+                              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                            >
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>{p.name}</div>
+                                <div style={{ fontSize: '0.73rem', color: '#6b7280', marginTop: '1px' }}>
+                                  {p.age ? `${p.age}y` : ''}{p.age && p.gender ? ' • ' : ''}{p.gender || ''}{(p.contact || p.phone) ? ` • ${p.contact || p.phone}` : ''}
+                                </div>
+                              </div>
+                              <span style={{ fontSize: '0.7rem', background: '#f0fdf4', color: '#16a34a', padding: '2px 8px', borderRadius: '10px', fontWeight: 700 }}>{q ? 'Existing' : 'Recent'}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })()}
                   {isNewPatient && patientSuggestions.length === 0 && !searching && (
                     <div style={{ marginTop: '5px', fontSize: '0.76rem', color: '#2563eb', display: 'flex', alignItems: 'center', gap: '4px' }}>
                       <User size={12} /> No existing patient — a new record will be created automatically.
@@ -342,11 +487,31 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
               <div style={{ height: '1px', background: '#f1f5f9', margin: '0 0 22px' }} />
 
               {/* LINE ITEMS */}
-              <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '12px' }}>Line Items</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.8px' }}>Line Items</span>
+                {loadingItems && (
+                  <span style={{ fontSize: '0.74rem', color: '#16a34a', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                    <Loader2 size={13} className="animate-spin" /> Loading prescribed items…
+                  </span>
+                )}
+              </div>
+              {autoNote && !loadingItems && (
+                <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '8px 12px', fontSize: '0.78rem', color: '#15803d', marginBottom: '12px' }}>
+                  {autoNote}
+                </div>
+              )}
               <div style={{ marginBottom: '22px' }}>
+                {/* Column headers */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px 96px 32px', gap: '8px', padding: '0 2px 6px', fontSize: '0.66rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+                  <span>Description</span>
+                  <span style={{ textAlign: 'center' }}>Qty</span>
+                  <span>Unit ₹</span>
+                  <span style={{ textAlign: 'right' }}>Amount</span>
+                  <span />
+                </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '10px' }}>
                   {items.map((item, idx) => (
-                    <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '1fr 130px 36px', gap: '8px', alignItems: 'center' }}>
+                    <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px 96px 32px', gap: '8px', alignItems: 'center' }}>
                       <input
                         className="input-field"
                         placeholder={`Item ${idx + 1} description`}
@@ -354,16 +519,24 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
                         onChange={e => updateItem(item.id, 'description', e.target.value)}
                         style={{ padding: '8px 12px', fontSize: '0.85rem' }}
                       />
+                      <input
+                        className="input-field"
+                        type="number" min="0" placeholder="1"
+                        value={item.qty}
+                        onChange={e => updateItem(item.id, 'qty', e.target.value)}
+                        style={{ padding: '8px', fontSize: '0.85rem', textAlign: 'center' }}
+                      />
                       <div style={{ position: 'relative' }}>
                         <span style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', fontSize: '0.85rem' }}>₹</span>
                         <input
                           className="input-field"
                           type="number" min="0" placeholder="0"
-                          value={item.amount}
-                          onChange={e => updateItem(item.id, 'amount', e.target.value)}
+                          value={item.unitPrice}
+                          onChange={e => updateItem(item.id, 'unitPrice', e.target.value)}
                           style={{ padding: '8px 12px 8px 24px', fontSize: '0.85rem' }}
                         />
                       </div>
+                      <div style={{ textAlign: 'right', fontSize: '0.85rem', fontWeight: 600, color: '#374151' }}>{fmt(lineAmount(item))}</div>
                       <button
                         type="button"
                         onClick={() => items.length > 1 && removeItem(item.id)}
@@ -375,11 +548,34 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
                     </div>
                   ))}
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '10px', borderTop: '1px solid #f1f5f9' }}>
-                  <button type="button" className="btn btn-outline" style={{ padding: '5px 12px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px' }} onClick={addItem}>
+
+                <div style={{ paddingTop: '10px', borderTop: '1px solid #f1f5f9' }}>
+                  <button type="button" className="btn btn-outline" style={{ padding: '5px 12px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '14px' }} onClick={addItem}>
                     <Plus size={13} /> Add Item
                   </button>
-                  <div style={{ fontSize: '1rem', fontWeight: 700, color: '#16a34a' }}>Total: {fmt(totalAmount)}</div>
+
+                  {/* Totals — auto-calculated */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', maxWidth: '320px', marginLeft: 'auto', fontSize: '0.88rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b' }}>
+                      <span>Subtotal</span>
+                      <span style={{ fontWeight: 600, color: '#374151' }}>{fmt(subtotal)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#64748b' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                        Tax
+                        <input
+                          type="number" min="0" max="100" value={taxPercent}
+                          onChange={e => setTaxPercent(e.target.value)}
+                          style={{ width: '54px', padding: '3px 6px', borderRadius: '6px', border: '1px solid var(--border-color)', fontSize: '0.8rem', textAlign: 'center' }}
+                        /> %
+                      </span>
+                      <span style={{ fontWeight: 600, color: '#374151' }}>{fmt(taxAmount)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '7px', borderTop: '1px solid #f1f5f9' }}>
+                      <span style={{ fontWeight: 700 }}>Grand Total</span>
+                      <span style={{ fontSize: '1.15rem', fontWeight: 800, color: '#16a34a' }}>{fmt(grandTotal)}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -459,6 +655,11 @@ function CreateReceiptForm({ onClose, onSaved, authFetch }) {
 // ─── Main Billing Page ────────────────────────────────────────────────────────
 export default function Billing() {
   const { authFetch } = useAuth();
+  const location = useLocation();
+  // Deep-link from Patient Records: { newReceiptForPatient: {_id, name, ...} }
+  // opens the Create Receipt form with that patient pre-selected.
+  const initialPrefill = location.state?.newReceiptForPatient || null;
+
   const [bills, setBills]            = useState([]);
   const [totalRevenue, setTotalRev]  = useState(0);
   const [pendingRevenue, setPending] = useState(0);
@@ -467,8 +668,15 @@ export default function Billing() {
   const [loading, setLoading]        = useState(true);
   const [error, setError]            = useState('');
   const [markingId, setMarkingId]    = useState(null);
-  const [showCreate, setShowCreate]  = useState(false);
+  const [showCreate, setShowCreate]  = useState(!!initialPrefill);
+  const [prefillPatient, setPrefillPatient] = useState(initialPrefill);
   const [paymentBill, setPaymentBill] = useState(null);
+
+  // Clear the navigation state once consumed so a refresh doesn't re-open the form.
+  useEffect(() => {
+    if (initialPrefill) window.history.replaceState({}, '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const fetchBills = useCallback(async () => {
     setLoading(true); setError('');
@@ -542,8 +750,9 @@ export default function Billing() {
       {showCreate && (
         <CreateReceiptForm
           authFetch={authFetch}
-          onClose={() => setShowCreate(false)}
-          onSaved={() => { setShowCreate(false); fetchBills(); }}
+          prefillPatient={prefillPatient}
+          onClose={() => { setShowCreate(false); setPrefillPatient(null); }}
+          onSaved={() => { setShowCreate(false); setPrefillPatient(null); fetchBills(); }}
         />
       )}
 
@@ -578,7 +787,8 @@ export default function Billing() {
         </div>
       )}
 
-      {/* ── Bills table ────────────────────────────────────────────────────── */}
+      {/* ── Bills table (hidden while creating a new record — form gets the whole screen) ── */}
+      {!showCreate && (
       <div className="glass-panel">
         <div style={{ display: 'flex', gap: '16px', marginBottom: '20px' }}>
           <div className="input-field" style={{ flex: 1, display: 'flex', alignItems: 'center', background: 'var(--bg-input)' }}>
@@ -657,6 +867,7 @@ export default function Billing() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
