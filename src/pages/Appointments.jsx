@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
-import { AlertModal } from '../components/Modal.jsx';
+import Modal, { AlertModal } from '../components/Modal.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const STATUS_COLORS = {
@@ -132,6 +132,243 @@ function ApptRow({ appt, busy, onConsult, onDone, onCancel, onReopen }) {
   );
 }
 
+// ─── Add Appointment modal (doctor-side quick booking) ───────────────────────
+// Reused for both walk-ins (date = today) and future-date scheduling. Patient
+// autocomplete searches existing patients; if the typed name doesn't match,
+// a new patient record is created on submit. Uses existing endpoints only.
+function AddAppointmentModal({ open, onClose, onSaved, authFetch, defaultDate }) {
+  const empty = () => ({
+    name: '', phone: '', age: '', gender: 'Male',
+    date: defaultDate || toISO(new Date()),
+    time: '', reason: '', isEmergency: false,
+  });
+  const [form, setForm] = useState(empty());
+  const [patientId, setPatientId] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const debounceRef = useRef(null);
+
+  // Reset when reopened
+  useEffect(() => {
+    if (open) {
+      setForm(empty());
+      setPatientId(null);
+      setSuggestions([]);
+      setErr('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, defaultDate]);
+
+  const setF = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  // Debounced patient search as the doctor types a name
+  const onNameChange = (val) => {
+    setF('name', val);
+    setPatientId(null);
+    clearTimeout(debounceRef.current);
+    if (val.trim().length < 2) { setSuggestions([]); return; }
+    setSearching(true);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const r = await authFetch(`${API}/api/patients/search?q=${encodeURIComponent(val.trim())}`);
+        const data = await r.json();
+        setSuggestions(Array.isArray(data) ? data.slice(0, 6) : []);
+      } catch { setSuggestions([]); }
+      finally { setSearching(false); }
+    }, 250);
+  };
+
+  const selectExisting = (p) => {
+    setForm(f => ({
+      ...f,
+      name:   p.name || '',
+      phone:  p.contact || p.phone || f.phone,
+      age:    p.age ? String(p.age) : f.age,
+      gender: p.gender || f.gender,
+    }));
+    setPatientId(p._id || p.id);
+    setSuggestions([]);
+  };
+
+  const submit = async () => {
+    setErr('');
+    if (!form.name.trim()) { setErr('Patient name is required.'); return; }
+    if (!form.date)        { setErr('Date is required.'); return; }
+    setSaving(true);
+    try {
+      let pid = patientId;
+      // 1) Create the patient if not linked to an existing one
+      if (!pid) {
+        const pr = await authFetch(`${API}/api/patients`, {
+          method: 'POST',
+          body: JSON.stringify({
+            name:    form.name.trim(),
+            age:     form.age ? Number(form.age) : 0,
+            contact: form.phone.trim(),
+            gender:  form.gender || 'Male',
+          }),
+        });
+        if (!pr.ok) throw new Error('Could not create the patient record.');
+        const p = await pr.json();
+        pid = p._id;
+      }
+      // 2) Book the appointment (backend auto-assigns the token number)
+      const dateISO = new Date(`${form.date}T${form.time || '09:00'}`).toISOString();
+      const ar = await authFetch(`${API}/api/appointments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          patientId:   pid,
+          patientName: form.name.trim(),
+          date:        dateISO,
+          time:        form.time,
+          reason:      form.reason.trim(),
+          age:         form.age ? Number(form.age) : null,
+          gender:      form.gender,
+          isEmergency: !!form.isEmergency,
+        }),
+      });
+      if (!ar.ok) throw new Error('Could not book the appointment.');
+      onSaved(form.date); // pass back the booked date so the parent can navigate to it
+      onClose();
+    } catch (e) {
+      setErr(e.message || 'Booking failed.');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal
+      isOpen={open}
+      onClose={onClose}
+      title="Add appointment"
+      icon={<Plus size={20} color="var(--primary)" />}
+      maxWidth="540px"
+      footer={
+        <>
+          <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            onClick={submit}
+            disabled={saving || !form.name.trim() || !form.date}
+            style={form.isEmergency ? { background: '#ef4444' } : undefined}
+          >
+            {saving ? <Loader2 size={14} className="animate-spin" /> : (form.isEmergency ? <AlertTriangle size={14} /> : <Plus size={14} />)}
+            {form.isEmergency ? ' Book emergency' : ' Book appointment'}
+          </button>
+        </>
+      }
+    >
+      {err && (
+        <div style={{ marginBottom: '14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '8px 12px', color: '#dc2626', fontSize: '0.84rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <AlertTriangle size={14} /> {err}
+        </div>
+      )}
+
+      {/* Patient name with autocomplete */}
+      <div className="input-group" style={{ position: 'relative' }}>
+        <label className="input-label">
+          Patient name *
+          {patientId && <span style={{ marginLeft: '8px', fontSize: '0.72rem', background: '#f0fdf4', color: '#16a34a', border: '1px solid #86efac', padding: '2px 8px', borderRadius: '12px', fontWeight: 700 }}>✓ Existing</span>}
+          {!patientId && form.name.trim().length > 1 && <span style={{ marginLeft: '8px', fontSize: '0.72rem', background: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe', padding: '2px 8px', borderRadius: '12px', fontWeight: 700 }}>+ New — will be registered</span>}
+        </label>
+        <div style={{ position: 'relative' }}>
+          <Search size={14} style={{ position: 'absolute', left: '11px', top: '50%', transform: 'translateY(-50%)', color: '#9ca3af' }} />
+          <input
+            className="input-field"
+            style={{ paddingLeft: '34px' }}
+            placeholder="Search existing or type new name…"
+            value={form.name}
+            onChange={(e) => onNameChange(e.target.value)}
+            autoFocus
+            autoComplete="off"
+          />
+          {searching && <Loader2 size={14} className="animate-spin" style={{ position: 'absolute', right: '11px', top: '50%', transform: 'translateY(-50%)', color: 'var(--primary)' }} />}
+        </div>
+        {suggestions.length > 0 && (
+          <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, maxHeight: '200px', overflowY: 'auto', padding: '4px', marginTop: '2px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)' }}>
+            {suggestions.map(p => (
+              <div key={p._id || p.id} onMouseDown={() => selectExisting(p)}
+                style={{ padding: '8px 12px', cursor: 'pointer', borderRadius: '6px' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                <div style={{ fontWeight: 700, fontSize: '0.86rem' }}>{p.name}</div>
+                <div style={{ fontSize: '0.72rem', color: '#6b7280' }}>
+                  {p.age ? `${p.age}y` : ''}{p.age && p.gender ? ' · ' : ''}{p.gender || ''}{(p.contact || p.phone) ? ` · ${p.contact || p.phone}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Demographic + contact */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' }}>
+        <div className="input-group">
+          <label className="input-label">Age</label>
+          <input type="number" min="0" max="120" className="input-field" value={form.age} onChange={e => setF('age', e.target.value)} placeholder="e.g. 35" />
+        </div>
+        <div className="input-group">
+          <label className="input-label">Gender</label>
+          <CustomSelect value={form.gender} onChange={v => setF('gender', v)} width="100%" matchInput
+            options={[
+              { value: 'Male', label: 'Male' },
+              { value: 'Female', label: 'Female' },
+              { value: 'Other', label: 'Other' },
+            ]}
+          />
+        </div>
+        <div className="input-group">
+          <label className="input-label">Phone</label>
+          <input type="tel" className="input-field" value={form.phone} onChange={e => setF('phone', e.target.value)} placeholder="e.g. 9876543210" />
+        </div>
+      </div>
+
+      {/* Date + time */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+        <div className="input-group">
+          <label className="input-label">Date *</label>
+          <input type="date" className="input-field" value={form.date} onChange={e => setF('date', e.target.value)} />
+        </div>
+        <div className="input-group">
+          <label className="input-label">Time</label>
+          <input type="time" className="input-field" value={form.time} onChange={e => setF('time', e.target.value)} />
+        </div>
+      </div>
+
+      {/* Reason */}
+      <div className="input-group">
+        <label className="input-label">Reason for visit</label>
+        <input type="text" className="input-field" value={form.reason} onChange={e => setF('reason', e.target.value)} placeholder="e.g. fever, follow-up" />
+      </div>
+
+      {/* Emergency toggle */}
+      <div
+        onClick={() => setF('isEmergency', !form.isEmergency)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          padding: '10px 14px', borderRadius: '10px', cursor: 'pointer',
+          background: form.isEmergency ? '#fef2f2' : 'var(--bg-muted)',
+          border: `1.5px solid ${form.isEmergency ? '#ef4444' : 'var(--border-color)'}`,
+        }}
+      >
+        <div style={{
+          width: '18px', height: '18px', borderRadius: '5px', flexShrink: 0,
+          border: `2px solid ${form.isEmergency ? '#ef4444' : '#d1d5db'}`,
+          background: form.isEmergency ? '#ef4444' : 'white',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          {form.isEmergency && <svg width="10" height="10" viewBox="0 0 12 12"><path d="M1.5 6L5 9.5L10.5 2.5" stroke="white" strokeWidth="2" strokeLinecap="round" fill="none" /></svg>}
+        </div>
+        <span style={{ fontSize: '0.86rem', fontWeight: 600, color: form.isEmergency ? '#991b1b' : 'var(--text-main)' }}>
+          Emergency case
+        </span>
+      </div>
+    </Modal>
+  );
+}
+
 function DoctorView() {
   const { authFetch } = useAuth();
   const navigate = useNavigate();
@@ -145,6 +382,7 @@ function DoctorView() {
   const [loading, setLoading]           = useState(true);
   const [busyId, setBusyId]             = useState(null);     // row being mutated
   const [confirmCancel, setConfirmCancel] = useState(null);   // appt pending cancel
+  const [addOpen, setAddOpen]           = useState(false);    // "Add appointment" modal
 
   const confirmOpenRef = useRef(false);
   useEffect(() => { confirmOpenRef.current = !!confirmCancel; }, [confirmCancel]);
@@ -282,26 +520,29 @@ function DoctorView() {
             {scope === 'day' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'var(--bg-input)', border: '1.5px solid var(--border-color)', borderRadius: '10px', padding: '6px 12px' }}>
                 <Calendar size={15} color="var(--primary)" />
-                <input type="date" value={day} max={toISO(new Date())} onChange={e => e.target.value && setDay(e.target.value)}
+                <input type="date" value={day} onChange={e => e.target.value && setDay(e.target.value)}
                   style={{ border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-main)', fontSize: '0.84rem', cursor: 'pointer', fontFamily: 'var(--font-primary)' }} />
               </div>
             )}
 
             <button
               className="btn btn-outline"
-              style={{ padding: '8px 10px', opacity: (scope === 'day' && isTodaySelected) ? 0.45 : 1 }}
+              style={{ padding: '8px 10px' }}
               onClick={() => step(1)}
-              disabled={scope === 'day' && isTodaySelected}
               title={scope === 'day' ? 'Next day' : 'Next week'}
             >
               <ChevronRight size={16} />
             </button>
 
             {!isTodaySelected && (
-              <button className="btn btn-primary" style={{ fontSize: '0.82rem', padding: '8px 14px' }} onClick={goToday}>
+              <button className="btn btn-outline" style={{ fontSize: '0.82rem', padding: '8px 14px' }} onClick={goToday}>
                 <RotateCcw size={14} /> Today
               </button>
             )}
+
+            <button className="btn btn-primary" style={{ fontSize: '0.82rem', padding: '8px 14px' }} onClick={() => setAddOpen(true)}>
+              <Plus size={14} /> Add appointment
+            </button>
           </div>
         </div>
 
@@ -394,6 +635,19 @@ function DoctorView() {
         type="danger"
         showConfirm
         onConfirm={doCancel}
+      />
+
+      {/* Add appointment modal — defaults the date to the currently-viewed day */}
+      <AddAppointmentModal
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        defaultDate={day}
+        authFetch={authFetch}
+        onSaved={(bookedDate) => {
+          // Jump to the booked day so the doctor sees the new row right away.
+          if (scope === 'day' && bookedDate) setDay(bookedDate);
+          fetchAppointments();
+        }}
       />
     </div>
   );
