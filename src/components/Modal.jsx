@@ -27,6 +27,10 @@ export default function Modal({ isOpen, onClose, title, children, footer, maxWid
           boxShadow: '0 32px 64px -12px rgba(0,0,0,0.35)',
           overflow: 'hidden',
           animation: 'modalPopIn 0.22s cubic-bezier(0.34,1.56,0.64,1) forwards',
+          // Stay within the viewport — the body scrolls if content is too tall.
+          maxHeight: 'calc(100vh - 40px)',
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
         {/* Top green accent bar */}
@@ -74,8 +78,8 @@ export default function Modal({ isOpen, onClose, title, children, footer, maxWid
           </button>
         </div>
 
-        {/* Body */}
-        <div style={{ padding: '24px 28px' }}>{children}</div>
+        {/* Body — scrolls when content exceeds available height */}
+        <div style={{ padding: '24px 28px', overflowY: 'auto', flex: 1, minHeight: 0 }}>{children}</div>
 
         {/* Footer */}
         {footer && (
