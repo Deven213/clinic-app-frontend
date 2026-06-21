@@ -2,12 +2,13 @@ import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: 'AIzaSyCSavbBMpWHs4FzlSLHk3viJB0hICrAh6c',
-  authDomain: 'abcd-fb39f.firebaseapp.com',
-  projectId: 'abcd-fb39f',
-  storageBucket: 'abcd-fb39f.firebasestorage.app',
-  messagingSenderId: '345319161170',
-  appId: '1:345319161170:web:b4065236bfad974d824e8b',
+  apiKey: 'AIzaSyBj8km1jFRJEFa-ZT772lLvDZxF6YtBKkg',
+  authDomain: 'medicore-clinic-65b17.firebaseapp.com',
+  projectId: 'medicore-clinic-65b17',
+  storageBucket: 'medicore-clinic-65b17.firebasestorage.app',
+  messagingSenderId: '692984813828',
+  appId: '1:692984813828:web:76a316a219077247769851',
+  measurementId: 'G-VTBCJ5C0DP',
 };
 
 export const isFirebaseConfigured = true;
