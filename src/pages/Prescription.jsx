@@ -753,41 +753,71 @@ export default function Prescription() {
               </div>
             )}
 
-            {/* Parsed preview + Apply */}
-            {parsed && (parsed.age || parsed.gender || parsed.diagnosis || parsed.medicines.length > 0) && (
-              <div style={{ marginTop: '10px', padding: '10px 12px', background: 'white', borderRadius: '8px', border: '1px solid #86efac' }}>
-                <div style={{ fontSize: '0.72rem', color: '#15803d', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>
-                  Extracted — review &amp; apply
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
-                  {parsed.age      && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Age: {parsed.age}</span>}
-                  {parsed.gender   && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Gender: {parsed.gender}</span>}
-                  {parsed.diagnosis && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Diagnosis: {parsed.diagnosis}</span>}
-                </div>
-                {parsed.medicines.length > 0 && (
-                  <div style={{ fontSize: '0.78rem', color: '#0f172a' }}>
-                    <strong>Medicines:</strong>
-                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                      {parsed.medicines.map((m, i) => (
-                        <li key={i} style={{ marginBottom: '2px' }}>
-                          {m.name} — {m.days} day{m.days === 1 ? '' : 's'}
-                          {m.timing ? ` · ${m.timing}` : ''}
-                          {m.anupan ? ` · ${m.anupan}` : ''}
-                        </li>
-                      ))}
-                    </ul>
+            {/* Parsed preview + Apply — always shown after the doctor stops,
+                so they always see feedback (and the Apply button) instead of
+                wondering whether anything happened. */}
+            {parsed && (() => {
+              const hasAny = !!(parsed.age || parsed.gender || parsed.diagnosis || parsed.medicines.length > 0);
+              return (
+                <div style={{ marginTop: '10px', padding: '12px 14px', background: 'white', borderRadius: '8px', border: '2px solid ' + (hasAny ? '#86efac' : '#fde68a') }}>
+                  <div style={{ fontSize: '0.72rem', color: hasAny ? '#15803d' : '#92400e', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>
+                    {hasAny ? 'Extracted — review & apply' : "Couldn't pick anything out"}
                   </div>
-                )}
-                <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                  <button onClick={applyVoice} className="btn btn-primary" style={{ padding: '6px 14px', fontSize: '0.82rem' }}>
-                    <CheckCircle size={13} /> Apply to form
-                  </button>
-                  <button onClick={clearVoice} className="btn btn-outline" style={{ padding: '6px 12px', fontSize: '0.82rem' }}>
-                    Discard
-                  </button>
+
+                  {hasAny ? (
+                    <>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: parsed.medicines.length ? '8px' : '0' }}>
+                        {parsed.age      && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Age: {parsed.age}</span>}
+                        {parsed.gender   && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Gender: {parsed.gender}</span>}
+                        {parsed.diagnosis && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Diagnosis: {parsed.diagnosis}</span>}
+                      </div>
+                      {parsed.medicines.length > 0 && (
+                        <div style={{ fontSize: '0.8rem', color: '#0f172a' }}>
+                          <strong>Medicines ({parsed.medicines.length}):</strong>
+                          <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                            {parsed.medicines.map((m, i) => (
+                              <li key={i} style={{ marginBottom: '2px' }}>
+                                <strong>{m.name}</strong> — {m.days} day{m.days === 1 ? '' : 's'}
+                                {m.timing ? ` · ${m.timing}` : ''}
+                                {m.anupan ? ` · ${m.anupan}` : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{ fontSize: '0.82rem', color: '#475569' }}>
+                      Try saying the age, gender, condition and medicines clearly — for example: <em>"Thirty-five-year-old male, acidity, give him Avipattikar Churna for fifteen days after food."</em>
+                    </div>
+                  )}
+
+                  {/* Action buttons — always visible whether or not anything was extracted */}
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={applyVoice}
+                      disabled={!hasAny}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '6px',
+                        padding: '8px 18px', borderRadius: '8px', border: 'none',
+                        background: hasAny ? '#16a34a' : '#cbd5e1',
+                        color: 'white', fontWeight: 700, fontSize: '0.86rem',
+                        cursor: hasAny ? 'pointer' : 'not-allowed',
+                        boxShadow: hasAny ? '0 4px 12px rgba(22,163,74,0.25)' : 'none',
+                      }}
+                    >
+                      <CheckCircle size={14} /> Apply to form
+                    </button>
+                    <button onClick={startListening} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 14px', borderRadius: '8px', border: '1.5px solid #1d4ed8', background: 'white', color: '#1d4ed8', fontWeight: 600, fontSize: '0.84rem', cursor: 'pointer' }}>
+                      <Mic size={13} /> Try again
+                    </button>
+                    <button onClick={clearVoice} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 14px', borderRadius: '8px', border: '1.5px solid var(--border-color)', background: 'white', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.84rem', cursor: 'pointer' }}>
+                      Discard
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
 
           {/* ── Phone-first quick lookup ────────────────────────────────────
