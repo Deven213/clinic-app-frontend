@@ -1,14 +1,24 @@
 import { X, CheckCircle, AlertCircle, HelpCircle, Info } from 'lucide-react';
+import { createPortal } from 'react-dom';
 
 /**
  * Modal — Doctor-Appointment-Form-inspired popup.
  * Features: green accent bar, large bold title, blurred dark overlay,
  * smooth scale-in animation. Use current green color theme.
+ *
+ * Rendered via Portal to document.body. Reason: the page wrappers use
+ * `animate-fade-in` whose keyframe ends with `transform: translateY(0)`.
+ * Because of `animation-fill-mode: forwards`, that transform stays applied
+ * permanently — and any `transform` on an ancestor creates a new containing
+ * block for fixed-positioned descendants, which would break `inset: 0` (the
+ * modal would be sized to the wrapper, not the viewport). Portalling to
+ * document.body sidesteps every ancestor entirely.
  */
 export default function Modal({ isOpen, onClose, title, children, footer, maxWidth = '520px', icon }) {
   if (!isOpen) return null;
+  if (typeof document === 'undefined') return null;
 
-  return (
+  return createPortal((
     <div
       style={{
         position: 'fixed', inset: 0,
@@ -100,7 +110,7 @@ export default function Modal({ isOpen, onClose, title, children, footer, maxWid
         }
       `}</style>
     </div>
-  );
+  ), document.body);
 }
 
 /** Convenience helper — renders icon + message inside a Modal */
