@@ -663,6 +663,12 @@ function ReceptionistView({ queue, onAddAppointment }) {
   const [bookingStatus, setBookingStatus]           = useState('');
   const [bookingMsg, setBookingMsg]                 = useState('');
 
+  // ── Phone-first quick lookup (the receptionist's fast path) ───────────────
+  const [phoneLookup, setPhoneLookup]   = useState('');
+  const [phoneStatus, setPhoneStatus]   = useState('idle'); // idle | searching | found | notfound
+  const [phoneFoundInfo, setFoundInfo]  = useState(null);
+  const lookupTimerRef = useRef(null);
+
   const emptyForm = () => ({
     patientId: '', patientName: '', phone: '', age: '', gender: 'Male',
     bloodGroup: '', weight: '', address: '',
@@ -707,7 +713,47 @@ function ReceptionistView({ queue, onAddAppointment }) {
     setPatientQuery('');
     setForm(emptyForm());
     setPatientSuggestions([]);
+    setPhoneLookup('');
+    setPhoneStatus('idle');
+    setFoundInfo(null);
   };
+
+  // ── Phone-first lookup effect — debounced, fires at 10 digits ─────────────
+  useEffect(() => {
+    clearTimeout(lookupTimerRef.current);
+    const digits = phoneLookup.replace(/\D/g, '');
+    if (digits.length !== 10) {
+      if (phoneStatus !== 'idle') setPhoneStatus('idle');
+      if (phoneFoundInfo) setFoundInfo(null);
+      return;
+    }
+    setPhoneStatus('searching');
+    lookupTimerRef.current = setTimeout(async () => {
+      try {
+        const r = await authFetch(`${API}/api/patients/search?q=${encodeURIComponent(digits)}`);
+        const list = await r.json();
+        const exact = Array.isArray(list)
+          ? list.find(p => (p.contact || p.phone || '').replace(/\D/g, '') === digits)
+          : null;
+        if (!exact) {
+          // Brand-new patient — receptionist will fill demographics
+          setPhoneStatus('notfound');
+          setFoundInfo(null);
+          set('patientId', '');
+          set('phone', digits);
+          return;
+        }
+        // Existing patient — auto-fill everything via selectPatient
+        selectPatient(exact);
+        setPhoneStatus('found');
+        setFoundInfo({ name: exact.name, age: exact.age, gender: exact.gender });
+      } catch {
+        setPhoneStatus('notfound');
+      }
+    }, 300);
+    return () => clearTimeout(lookupTimerRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phoneLookup, authFetch]);
 
   const handleBook = async (e) => {
     e.preventDefault();
@@ -834,6 +880,64 @@ function ReceptionistView({ queue, onAddAppointment }) {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+              {/* ── Phone-first quick lookup (fastest path for returning patients) ── */}
+              <div style={{
+                background: 'linear-gradient(135deg,#f0fdf4,#dcfce7)',
+                border: '2px solid #86efac',
+                borderRadius: '12px',
+                padding: '14px 18px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <Phone size={15} color="#16a34a" />
+                  <span style={{ fontWeight: 700, color: '#15803d', fontSize: '0.86rem' }}>
+                    Fast lookup — type the patient's 10-digit phone first
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <Search size={15} color="#9ca3af" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                    <input
+                      type="tel"
+                      autoFocus
+                      placeholder="9876543210"
+                      value={phoneLookup}
+                      onChange={(e) => setPhoneLookup(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                      style={{
+                        width: '100%',
+                        padding: '11px 14px 11px 36px',
+                        fontSize: '1rem',
+                        letterSpacing: '0.05em',
+                        border: '1.5px solid #bbf7d0',
+                        borderRadius: '10px',
+                        background: 'white',
+                        outline: 'none',
+                        fontFamily: 'var(--font-primary)',
+                      }}
+                    />
+                  </div>
+                  {phoneStatus === 'searching' && <Loader2 size={18} className="animate-spin" color="#16a34a" />}
+                  {phoneStatus === 'found'     && <CheckCircle size={20} color="#16a34a" />}
+                  {phoneStatus === 'notfound'  && <Plus size={20} color="#2563eb" />}
+                </div>
+                {phoneStatus === 'found' && phoneFoundInfo && (
+                  <div style={{ marginTop: '10px', padding: '10px 12px', background: 'white', borderRadius: '8px', border: '1px solid #bbf7d0' }}>
+                    <div style={{ fontWeight: 700, color: '#15803d', fontSize: '0.92rem' }}>
+                      ✓ {phoneFoundInfo.name}
+                      {phoneFoundInfo.age ? ` · ${phoneFoundInfo.age}y` : ''}
+                      {phoneFoundInfo.gender ? ` · ${phoneFoundInfo.gender}` : ''}
+                    </div>
+                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '3px' }}>
+                      Demographics auto-filled — just pick a date/time and book.
+                    </div>
+                  </div>
+                )}
+                {phoneStatus === 'notfound' && (
+                  <div style={{ marginTop: '10px', padding: '10px 12px', background: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe', fontSize: '0.86rem', color: '#1d4ed8', fontWeight: 600 }}>
+                    + New patient — fill the details below.
+                  </div>
+                )}
+              </div>
 
               {/* Patient search with autocomplete */}
               <div className="input-group" style={{ position: 'relative' }}>
