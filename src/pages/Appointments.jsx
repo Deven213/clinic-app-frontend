@@ -265,12 +265,11 @@ function AddAppointmentModal({ open, onClose, onSaved, authFetch, defaultDate })
         </div>
       )}
 
-      {/* Patient name with autocomplete */}
-      <div className="input-group" style={{ position: 'relative' }}>
+      {/* Patient name with autocomplete — compact (no inline badges) */}
+      <div className="input-group" style={{ position: 'relative', marginBottom: '12px' }}>
         <label className="input-label">
           Patient name *
-          {patientId && <span style={{ marginLeft: '8px', fontSize: '0.72rem', background: '#f0fdf4', color: '#16a34a', border: '1px solid #86efac', padding: '2px 8px', borderRadius: '12px', fontWeight: 700 }}>✓ Existing</span>}
-          {!patientId && form.name.trim().length > 1 && <span style={{ marginLeft: '8px', fontSize: '0.72rem', background: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe', padding: '2px 8px', borderRadius: '12px', fontWeight: 700 }}>+ New — will be registered</span>}
+          {patientId && <span style={{ marginLeft: '8px', fontSize: '0.7rem', color: '#16a34a', fontWeight: 700 }}>✓ Existing</span>}
         </label>
         <div style={{ position: 'relative' }}>
           <Search size={14} style={{ position: 'absolute', left: '11px', top: '50%', transform: 'translateY(-50%)', color: '#9ca3af' }} />
@@ -280,13 +279,12 @@ function AddAppointmentModal({ open, onClose, onSaved, authFetch, defaultDate })
             placeholder="Search existing or type new name…"
             value={form.name}
             onChange={(e) => onNameChange(e.target.value)}
-            autoFocus
             autoComplete="off"
           />
           {searching && <Loader2 size={14} className="animate-spin" style={{ position: 'absolute', right: '11px', top: '50%', transform: 'translateY(-50%)', color: 'var(--primary)' }} />}
         </div>
         {suggestions.length > 0 && (
-          <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, maxHeight: '200px', overflowY: 'auto', padding: '4px', marginTop: '2px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)' }}>
+          <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, maxHeight: '180px', overflowY: 'auto', padding: '4px', marginTop: '2px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)' }}>
             {suggestions.map(p => (
               <div key={p._id || p.id} onMouseDown={() => selectExisting(p)}
                 style={{ padding: '8px 12px', cursor: 'pointer', borderRadius: '6px' }}
@@ -303,13 +301,13 @@ function AddAppointmentModal({ open, onClose, onSaved, authFetch, defaultDate })
         )}
       </div>
 
-      {/* Demographic + contact */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' }}>
-        <div className="input-group">
+      {/* Demographic + contact (3 cols, tight) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '12px' }}>
+        <div className="input-group" style={{ margin: 0 }}>
           <label className="input-label">Age</label>
           <input type="number" min="0" max="120" className="input-field" value={form.age} onChange={e => setF('age', e.target.value)} placeholder="e.g. 35" />
         </div>
-        <div className="input-group">
+        <div className="input-group" style={{ margin: 0 }}>
           <label className="input-label">Gender</label>
           <CustomSelect value={form.gender} onChange={v => setF('gender', v)} width="100%" matchInput
             options={[
@@ -319,26 +317,26 @@ function AddAppointmentModal({ open, onClose, onSaved, authFetch, defaultDate })
             ]}
           />
         </div>
-        <div className="input-group">
+        <div className="input-group" style={{ margin: 0 }}>
           <label className="input-label">Phone</label>
           <input type="tel" className="input-field" value={form.phone} onChange={e => setF('phone', e.target.value)} placeholder="e.g. 9876543210" />
         </div>
       </div>
 
-      {/* Date + time */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-        <div className="input-group">
+      {/* Date + time (2 cols, tight) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
+        <div className="input-group" style={{ margin: 0 }}>
           <label className="input-label">Date *</label>
           <input type="date" className="input-field" value={form.date} onChange={e => setF('date', e.target.value)} />
         </div>
-        <div className="input-group">
+        <div className="input-group" style={{ margin: 0 }}>
           <label className="input-label">Time</label>
           <input type="time" className="input-field" value={form.time} onChange={e => setF('time', e.target.value)} />
         </div>
       </div>
 
       {/* Reason */}
-      <div className="input-group">
+      <div className="input-group" style={{ marginBottom: '12px' }}>
         <label className="input-label">Reason for visit</label>
         <input type="text" className="input-field" value={form.reason} onChange={e => setF('reason', e.target.value)} placeholder="e.g. fever, follow-up" />
       </div>
@@ -348,20 +346,20 @@ function AddAppointmentModal({ open, onClose, onSaved, authFetch, defaultDate })
         onClick={() => setF('isEmergency', !form.isEmergency)}
         style={{
           display: 'flex', alignItems: 'center', gap: '10px',
-          padding: '10px 14px', borderRadius: '10px', cursor: 'pointer',
+          padding: '8px 12px', borderRadius: '10px', cursor: 'pointer',
           background: form.isEmergency ? '#fef2f2' : 'var(--bg-muted)',
           border: `1.5px solid ${form.isEmergency ? '#ef4444' : 'var(--border-color)'}`,
         }}
       >
         <div style={{
-          width: '18px', height: '18px', borderRadius: '5px', flexShrink: 0,
+          width: '16px', height: '16px', borderRadius: '4px', flexShrink: 0,
           border: `2px solid ${form.isEmergency ? '#ef4444' : '#d1d5db'}`,
           background: form.isEmergency ? '#ef4444' : 'white',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           {form.isEmergency && <svg width="10" height="10" viewBox="0 0 12 12"><path d="M1.5 6L5 9.5L10.5 2.5" stroke="white" strokeWidth="2" strokeLinecap="round" fill="none" /></svg>}
         </div>
-        <span style={{ fontSize: '0.86rem', fontWeight: 600, color: form.isEmergency ? '#991b1b' : 'var(--text-main)' }}>
+        <span style={{ fontSize: '0.84rem', fontWeight: 600, color: form.isEmergency ? '#991b1b' : 'var(--text-main)' }}>
           Emergency case
         </span>
       </div>
