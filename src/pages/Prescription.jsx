@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
-import { FileText, Save, Send, Pill, Plus, X, Loader2, Download, AlertCircle, CheckCircle, HelpCircle, User, Stethoscope, ClipboardList } from 'lucide-react';
+import { FileText, Save, Send, Pill, Plus, X, Loader2, Download, AlertCircle, CheckCircle, HelpCircle, User, Stethoscope, ClipboardList, Phone, Search } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import Modal from '../components/Modal.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
@@ -59,6 +59,14 @@ export default function Prescription() {
   const [patientSuggestions, setPatientSuggestions] = useState([]);
   const [showPatientSug, setShowPatientSug]         = useState(false);
 
+  // ── Phone-first quick lookup ───────────────────────────────────────────────
+  // The fastest way for the doctor to recall a returning patient: type the
+  // 10-digit phone, instantly auto-fill demographics + last visit medicines.
+  const [phoneLookup, setPhoneLookup]   = useState('');
+  const [phoneStatus, setPhoneStatus]   = useState('idle'); // idle | searching | found | notfound
+  const [phoneFoundInfo, setFoundInfo]  = useState(null);
+  const lookupTimerRef = useRef(null);
+
   // ── Diagnosis / Disease autocomplete ────────────────────────────────────────
   const [diseaseSuggestions, setDiseaseSuggestions] = useState([]);
   const [showDiseaseSug, setShowDiseaseSug]         = useState(false);
@@ -116,6 +124,77 @@ export default function Prescription() {
     setPatientSuggestions([]);
     setShowPatientSug(false);
   };
+
+  // ── Phone-first lookup effect ─────────────────────────────────────────────
+  // Debounced; runs when the user has typed exactly 10 digits.
+  useEffect(() => {
+    clearTimeout(lookupTimerRef.current);
+    const digits = phoneLookup.replace(/\D/g, '');
+    if (digits.length !== 10) {
+      if (phoneStatus !== 'idle') setPhoneStatus('idle');
+      if (phoneFoundInfo) setFoundInfo(null);
+      return;
+    }
+    setPhoneStatus('searching');
+    lookupTimerRef.current = setTimeout(async () => {
+      try {
+        const r = await authFetch(`${API}/api/patients/search?q=${encodeURIComponent(digits)}`);
+        const list = await r.json();
+        const exact = Array.isArray(list)
+          ? list.find(p => (p.contact || p.phone || '').replace(/\D/g, '') === digits)
+          : null;
+
+        if (!exact) {
+          setPhoneStatus('notfound');
+          setFoundInfo(null);
+          // Pre-fill phone so the new patient is created with it on save
+          setPatientData(prev => ({ ...prev, phone: digits }));
+          setLinkedAppointment(null);
+          return;
+        }
+
+        // Found → autofill demographics + load latest prescription
+        selectPatient(exact);
+        setPhoneStatus('found');
+
+        try {
+          const pr = await authFetch(`${API}/api/prescriptions?patientId=${exact._id}&limit=1`);
+          const rxList = await pr.json();
+          const latest = Array.isArray(rxList) && rxList.length ? rxList[0] : null;
+          if (latest) {
+            if (latest.medicines && latest.medicines.length) {
+              setMedicines(latest.medicines.map((m, i) => ({
+                id: Date.now() + i,
+                name: m.name || '',
+                timing: m.timing || '',
+                anupan: m.anupan || '',
+                days: m.days || 7,
+              })));
+            }
+            setPatientData(prev => ({ ...prev, diagnosis: prev.diagnosis || latest.diagnosis || '' }));
+            if (latest.pathya  && !pathya)  setPathya(latest.pathya);
+            if (latest.apathya && !apathya) setApathya(latest.apathya);
+            setFoundInfo({
+              name:           exact.name,
+              age:            exact.age,
+              gender:         exact.gender,
+              lastVisitDate:  latest.createdAt,
+              lastDiagnosis:  latest.diagnosis,
+              medicinesCount: latest.medicines?.length || 0,
+            });
+          } else {
+            setFoundInfo({ name: exact.name, age: exact.age, gender: exact.gender, lastVisitDate: null });
+          }
+        } catch {
+          setFoundInfo({ name: exact.name, age: exact.age, gender: exact.gender });
+        }
+      } catch {
+        setPhoneStatus('notfound');
+      }
+    }, 300);
+    return () => clearTimeout(lookupTimerRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phoneLookup, authFetch]);
 
   // Load patient details when coming from Appointments page
   useEffect(() => {
@@ -400,6 +479,77 @@ export default function Prescription() {
         <div className="glass-panel" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
           <SectionHead icon={User} title="Patient details" />
+
+          {/* ── Phone-first quick lookup ────────────────────────────────────
+              The fastest path: doctor types the 10-digit phone first. If we
+              find an existing patient, demographics + last-visit medicines
+              are loaded automatically. ─────────────────────────────────── */}
+          <div style={{
+            background: 'linear-gradient(135deg,#f0fdf4,#dcfce7)',
+            border: '2px solid #86efac',
+            borderRadius: '12px',
+            padding: '14px 18px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+              <Phone size={15} color="#16a34a" />
+              <span style={{ fontWeight: 700, color: '#15803d', fontSize: '0.86rem' }}>
+                Fast lookup — type the patient's 10-digit phone first
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <Search size={15} color="#9ca3af" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                <input
+                  type="tel"
+                  autoFocus
+                  placeholder="9876543210"
+                  value={phoneLookup}
+                  onChange={(e) => setPhoneLookup(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                  style={{
+                    width: '100%',
+                    padding: '11px 14px 11px 36px',
+                    fontSize: '1rem',
+                    letterSpacing: '0.05em',
+                    border: '1.5px solid #bbf7d0',
+                    borderRadius: '10px',
+                    background: 'white',
+                    outline: 'none',
+                    fontFamily: 'var(--font-primary)',
+                  }}
+                />
+              </div>
+              {phoneStatus === 'searching' && <Loader2 size={18} className="animate-spin" color="#16a34a" />}
+              {phoneStatus === 'found'     && <CheckCircle size={20} color="#16a34a" />}
+              {phoneStatus === 'notfound'  && <Plus size={20} color="#2563eb" />}
+            </div>
+
+            {/* Result card */}
+            {phoneStatus === 'found' && phoneFoundInfo && (
+              <div style={{ marginTop: '10px', padding: '10px 12px', background: 'white', borderRadius: '8px', border: '1px solid #bbf7d0' }}>
+                <div style={{ fontWeight: 700, color: '#15803d', fontSize: '0.92rem' }}>
+                  ✓ {phoneFoundInfo.name}
+                  {phoneFoundInfo.age ? ` · ${phoneFoundInfo.age}y` : ''}
+                  {phoneFoundInfo.gender ? ` · ${phoneFoundInfo.gender}` : ''}
+                </div>
+                {phoneFoundInfo.lastVisitDate ? (
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                    Last visit {new Date(phoneFoundInfo.lastVisitDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    {phoneFoundInfo.lastDiagnosis ? ` · ${phoneFoundInfo.lastDiagnosis}` : ''}
+                    {phoneFoundInfo.medicinesCount ? ` · ${phoneFoundInfo.medicinesCount} medicine${phoneFoundInfo.medicinesCount === 1 ? '' : 's'} loaded` : ''}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                    First-time prescription for this patient.
+                  </div>
+                )}
+              </div>
+            )}
+            {phoneStatus === 'notfound' && (
+              <div style={{ marginTop: '10px', padding: '10px 12px', background: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe', fontSize: '0.86rem', color: '#1d4ed8', fontWeight: 600 }}>
+                + New patient — fill the details below.
+              </div>
+            )}
+          </div>
 
           {/* Patient Info Row 1: Name + Age + Gender + Phone */}
           <div className="resp-grid-4">
