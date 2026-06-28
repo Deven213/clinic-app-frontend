@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
-import { FileText, Save, Send, Pill, Plus, X, Loader2, Download, AlertCircle, CheckCircle, HelpCircle, User, Stethoscope, ClipboardList, Phone, Search } from 'lucide-react';
+import { FileText, Save, Send, Pill, Plus, X, Loader2, Download, AlertCircle, CheckCircle, HelpCircle, User, Stethoscope, ClipboardList, Phone, Search, Mic, MicOff, Sparkles } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import Modal from '../components/Modal.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
@@ -13,6 +13,133 @@ const emptyForm = () => ({
 });
 
 const emptyMed = () => ({ id: Date.now() + Math.random(), name: '', timing: '', anupan: '', days: 7 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// VOICE DICTATION HELPERS
+// Convert what the doctor said (a free-text transcript) into structured form
+// fields. Uses simple regex + a number-word table — no LLM call, no cost.
+// ═════════════════════════════════════════════════════════════════════════════
+const NUM_WORDS = {
+  'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+  'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+  'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+  'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19,
+  'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+  'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90,
+  'hundred': 100,
+};
+
+// "twenty-eight" / "twenty eight" / "28" → 28
+function wordsToNumber(text) {
+  if (!text) return null;
+  const t = String(text).trim().toLowerCase().replace(/-/g, ' ');
+  const digit = t.match(/^\d+$/);
+  if (digit) return Number(digit[0]);
+  const parts = t.split(/\s+/).filter(Boolean);
+  let total = 0, any = false;
+  for (const p of parts) {
+    if (NUM_WORDS[p] !== undefined) { total += NUM_WORDS[p]; any = true; }
+    else if (/^\d+$/.test(p)) { total += Number(p); any = true; }
+  }
+  return any ? total : null;
+}
+
+const COMMON_TIMINGS = [
+  { rx: /\b(before food|empty stomach)\b/i,         out: 'Before food' },
+  { rx: /\b(after food|after meals?)\b/i,           out: 'After food' },
+  { rx: /\b(at bedtime|before sleep|night)\b/i,     out: 'At bedtime' },
+  { rx: /\b(morning(?:\s+and\s+evening)?|twice daily|bd|b\.d\.)\b/i, out: 'Morning and evening' },
+  { rx: /\b(thrice daily|three times|tds|t\.d\.s\.)\b/i, out: 'Three times a day' },
+  { rx: /\b(once daily|od|o\.d\.)\b/i,              out: 'Once daily' },
+];
+const COMMON_ANUPANS = [
+  { rx: /\bwith\s+(warm\s+water|water)\b/i,    out: 'Warm water' },
+  { rx: /\bwith\s+honey\b/i,                   out: 'Honey' },
+  { rx: /\bwith\s+(milk|warm\s+milk)\b/i,      out: 'Milk' },
+  { rx: /\bwith\s+(ghee)\b/i,                  out: 'Ghee' },
+  { rx: /\bwith\s+(buttermilk)\b/i,            out: 'Buttermilk' },
+];
+
+function parseTranscript(transcript, knownMedicines = []) {
+  const t = (transcript || '').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  const out = { age: null, gender: null, diagnosis: null, medicines: [], raw: t };
+
+  // ── Age ────────────────────────────────────────────────────────────────────
+  // Tries: "28 year old", "twenty-eight-year-old", "age 35", "aged forty"
+  const ageRxList = [
+    /\b(\d{1,3})\s*[-]?\s*years?[-\s]*old\b/i,
+    /\b(\d{1,3})\s*y\/?o\b/i,
+    /\bage[d]?\s+(\d{1,3})\b/i,
+    /\b([a-z]+(?:[-\s][a-z]+)?)\s*[-]?\s*years?[-\s]*old\b/i,
+    /\baged?\s+([a-z]+(?:[-\s][a-z]+)?)\b/i,
+  ];
+  for (const rx of ageRxList) {
+    const m = t.match(rx);
+    if (m) {
+      const v = /^\d+$/.test(m[1]) ? Number(m[1]) : wordsToNumber(m[1]);
+      if (v && v > 0 && v < 120) { out.age = v; break; }
+    }
+  }
+
+  // ── Gender ────────────────────────────────────────────────────────────────
+  if (/\b(female|woman|lady|girl|mrs\.?|ms\.?)\b/i.test(t))      out.gender = 'Female';
+  else if (/\b(male|man|gentleman|boy|mr\.?)\b/i.test(t))        out.gender = 'Male';
+  // Pronoun fallback (lower confidence — only if no explicit gender word)
+  else if (/\b(she|her)\b/i.test(t))                             out.gender = 'Female';
+  else if (/\b(he|him|his)\b/i.test(t))                          out.gender = 'Male';
+
+  // ── Diagnosis / chief complaint ───────────────────────────────────────────
+  // "headache for three days", "complaining of acidity", "has fever"
+  const dxPatterns = [
+    /(?:complain(?:s|ing)?\s+of|suffering\s+from|patient\s+(?:has|with)|diagnos(?:ed|is)\s+(?:of|with))\s+([a-z][a-z\s]{2,40}?)(?:\s+for\s|\s+since|[,.]|$)/i,
+    /\b([a-z][a-z\s]{2,40}?)\s+for\s+(?:\d+|[a-z-]+)\s+days?\b/i,
+    /\bhas?\s+([a-z][a-z\s]{2,30}?)(?:[,.]|$)/i,
+  ];
+  for (const rx of dxPatterns) {
+    const m = t.match(rx);
+    if (m) {
+      const cand = m[1].trim().replace(/\s+/g, ' ');
+      // Skip if it looks like demographics
+      if (/(year|old|female|male|woman|man)/i.test(cand)) continue;
+      out.diagnosis = cand.charAt(0).toUpperCase() + cand.slice(1);
+      break;
+    }
+  }
+
+  // ── Medicines — match against known inventory names ───────────────────────
+  // For each known medicine, see if the transcript mentions it; if so, grab
+  // the duration ("for ten days") + timing + anupan from nearby text.
+  const seen = new Set();
+  // Sort by length desc so longer names are matched first ("Triphala Guggulu"
+  // before "Triphala Churna").
+  const meds = [...knownMedicines].sort((a, b) => b.length - a.length);
+  for (const name of meds) {
+    if (!name || seen.has(name.toLowerCase())) continue;
+    const escName = name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const rx = new RegExp(`\\b${escName}\\b`, 'i');
+    const m = t.match(rx);
+    if (!m) continue;
+    seen.add(name.toLowerCase());
+    const start = m.index;
+    const window = t.slice(Math.max(0, start - 60), start + name.length + 120);
+    // Days
+    let days = 7;
+    const d1 = window.match(/(?:for|x)\s+(\d+)\s+days?/i);
+    const d2 = window.match(/(?:for|x)\s+([a-z-]+(?:[-\s][a-z]+)?)\s+days?/i);
+    const dVal = d1 ? Number(d1[1]) : (d2 ? wordsToNumber(d2[1]) : null);
+    if (dVal && dVal > 0 && dVal < 365) days = dVal;
+    // Timing
+    let timing = '';
+    for (const t2 of COMMON_TIMINGS) { if (t2.rx.test(window)) { timing = t2.out; break; } }
+    // Anupan
+    let anupan = '';
+    for (const a of COMMON_ANUPANS) { if (a.rx.test(window)) { anupan = a.out; break; } }
+    out.medicines.push({ name, days, timing, anupan });
+  }
+
+  return out;
+}
 
 // Visual-only: a small section header used to group the form fields.
 function SectionHead({ icon: Icon, title, sub, divider }) {
@@ -66,6 +193,104 @@ export default function Prescription() {
   const [phoneStatus, setPhoneStatus]   = useState('idle'); // idle | searching | found | notfound
   const [phoneFoundInfo, setFoundInfo]  = useState(null);
   const lookupTimerRef = useRef(null);
+
+  // ── Voice dictation ────────────────────────────────────────────────────────
+  // Doctor presses 🎙 → speaks → the transcript is parsed into age/gender/
+  // diagnosis/medicines. Uses the browser's Web Speech API (free, on-device
+  // in Chrome/Edge/Safari). Not supported in Firefox.
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [listening, setListening]           = useState(false);
+  const [interim, setInterim]               = useState('');
+  const [transcript, setTranscript]         = useState('');
+  const [parsed, setParsed]                 = useState(null);
+  const [knownMedicines, setKnownMedicines] = useState([]);
+  const recognitionRef = useRef(null);
+
+  // Detect Web Speech API availability + lazily load the full inventory once
+  // (its names are the dictionary we match medicines against).
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setVoiceSupported(!!SR);
+
+    (async () => {
+      try {
+        const r = await authFetch(`${API}/api/inventory`);
+        const data = await r.json();
+        const list = Array.isArray(data) ? data : (data.items || data.medicines || []);
+        setKnownMedicines(list.map(m => m.medicineName).filter(Boolean));
+      } catch { /* ignore — medicines just won't be matched */ }
+    })();
+  }, [authFetch]);
+
+  const startListening = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const r = new SR();
+    r.lang = 'en-IN';
+    r.interimResults = true;
+    r.continuous = true;
+    let finalText = '';
+    r.onresult = (e) => {
+      let interimT = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) finalText += res[0].transcript + ' ';
+        else             interimT  += res[0].transcript;
+      }
+      setInterim(interimT);
+      if (finalText) setTranscript(t => (t + ' ' + finalText).trim());
+    };
+    r.onerror = () => setListening(false);
+    r.onend   = () => setListening(false);
+    setTranscript(''); setInterim(''); setParsed(null);
+    setListening(true);
+    r.start();
+    recognitionRef.current = r;
+  };
+
+  const stopListening = () => {
+    setListening(false);
+    setInterim('');
+    try { recognitionRef.current?.stop(); } catch {}
+    // Parse what we got
+    setTimeout(() => {
+      setTranscript(latest => {
+        const result = parseTranscript(latest, knownMedicines);
+        setParsed(result);
+        return latest;
+      });
+    }, 50);
+  };
+
+  // Apply the parsed fields into the actual form
+  const applyVoice = () => {
+    if (!parsed) return;
+    setPatientData(prev => ({
+      ...prev,
+      age:       parsed.age       ? String(parsed.age) : prev.age,
+      gender:    parsed.gender    || prev.gender,
+      diagnosis: parsed.diagnosis || prev.diagnosis,
+    }));
+    if (parsed.medicines.length > 0) {
+      const empties = medicines.filter(m => !m.name.trim());
+      const filled  = medicines.filter(m =>  m.name.trim());
+      const newOnes = parsed.medicines.map((m, i) => ({
+        id: Date.now() + i,
+        name:   m.name,
+        timing: m.timing,
+        anupan: m.anupan,
+        days:   m.days,
+      }));
+      // Replace empty rows with parsed ones, append the rest
+      setMedicines([...filled, ...newOnes, ...empties.slice(0, Math.max(0, empties.length - newOnes.length))]);
+    }
+    // Clear the voice panel state
+    setTranscript(''); setParsed(null);
+  };
+
+  const clearVoice = () => {
+    setTranscript(''); setInterim(''); setParsed(null);
+  };
 
   // ── Diagnosis / Disease autocomplete ────────────────────────────────────────
   const [diseaseSuggestions, setDiseaseSuggestions] = useState([]);
@@ -479,6 +704,91 @@ export default function Prescription() {
         <div className="glass-panel" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
           <SectionHead icon={User} title="Patient details" />
+
+          {/* ── Voice dictation ───────────────────────────────────────────
+              Doctor presses 🎙 → speaks → form fields auto-populate.
+              Frontend-only; uses the browser's Web Speech API. ────────── */}
+          <div style={{
+            background: voiceSupported ? 'linear-gradient(135deg,#eff6ff,#dbeafe)' : '#f3f4f6',
+            border: '2px solid ' + (voiceSupported ? '#93c5fd' : '#e5e7eb'),
+            borderRadius: '12px',
+            padding: '14px 18px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <Sparkles size={16} color="#1d4ed8" />
+              <span style={{ fontWeight: 700, color: voiceSupported ? '#1d4ed8' : '#6b7280', fontSize: '0.86rem' }}>
+                Voice dictation — fastest entry in the industry
+              </span>
+              {!voiceSupported && (
+                <span style={{ fontSize: '0.72rem', color: '#6b7280' }}>
+                  (Open in Chrome / Edge / Safari to use this — not supported in Firefox)
+                </span>
+              )}
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {listening
+                  ? <button onClick={stopListening} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 14px', borderRadius: '999px', border: 'none', background: '#ef4444', color: 'white', fontWeight: 700, cursor: 'pointer', boxShadow: '0 0 0 6px rgba(239,68,68,0.18)' }}>
+                      <MicOff size={14} /> Stop
+                    </button>
+                  : <button onClick={startListening} disabled={!voiceSupported} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 14px', borderRadius: '999px', border: 'none', background: voiceSupported ? '#1d4ed8' : '#9ca3af', color: 'white', fontWeight: 700, cursor: voiceSupported ? 'pointer' : 'not-allowed' }}>
+                      <Mic size={14} /> Speak
+                    </button>
+                }
+              </div>
+            </div>
+
+            <div style={{ fontSize: '0.74rem', color: '#475569', marginTop: '6px' }}>
+              Try: <em>"Twenty-eight-year-old female, headache for three days, give her Ashwagandha Churna for ten days after food with warm water."</em>
+            </div>
+
+            {/* Live transcript while listening */}
+            {(listening || transcript || interim) && (
+              <div style={{ marginTop: '10px', padding: '10px 12px', background: 'white', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>
+                  {listening ? 'Listening…' : 'Heard'}
+                </div>
+                <div style={{ fontSize: '0.86rem', color: '#0f172a' }}>
+                  {transcript}
+                  {interim && <span style={{ color: '#94a3b8', fontStyle: 'italic' }}> {interim}</span>}
+                </div>
+              </div>
+            )}
+
+            {/* Parsed preview + Apply */}
+            {parsed && (parsed.age || parsed.gender || parsed.diagnosis || parsed.medicines.length > 0) && (
+              <div style={{ marginTop: '10px', padding: '10px 12px', background: 'white', borderRadius: '8px', border: '1px solid #86efac' }}>
+                <div style={{ fontSize: '0.72rem', color: '#15803d', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>
+                  Extracted — review &amp; apply
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+                  {parsed.age      && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Age: {parsed.age}</span>}
+                  {parsed.gender   && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Gender: {parsed.gender}</span>}
+                  {parsed.diagnosis && <span style={{ fontSize: '0.78rem', background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d', padding: '3px 10px', borderRadius: '20px', fontWeight: 600 }}>Diagnosis: {parsed.diagnosis}</span>}
+                </div>
+                {parsed.medicines.length > 0 && (
+                  <div style={{ fontSize: '0.78rem', color: '#0f172a' }}>
+                    <strong>Medicines:</strong>
+                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                      {parsed.medicines.map((m, i) => (
+                        <li key={i} style={{ marginBottom: '2px' }}>
+                          {m.name} — {m.days} day{m.days === 1 ? '' : 's'}
+                          {m.timing ? ` · ${m.timing}` : ''}
+                          {m.anupan ? ` · ${m.anupan}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                  <button onClick={applyVoice} className="btn btn-primary" style={{ padding: '6px 14px', fontSize: '0.82rem' }}>
+                    <CheckCircle size={13} /> Apply to form
+                  </button>
+                  <button onClick={clearVoice} className="btn btn-outline" style={{ padding: '6px 12px', fontSize: '0.82rem' }}>
+                    Discard
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* ── Phone-first quick lookup ────────────────────────────────────
               The fastest path: doctor types the 10-digit phone first. If we
