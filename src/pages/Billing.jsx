@@ -3,10 +3,12 @@ import { useLocation } from 'react-router-dom';
 import {
   IndianRupee, FileText, CheckCircle, Search,
   Loader2, RefreshCw, AlertCircle, Plus, X, Trash2, User,
-  QrCode, MessageCircle, Copy, CheckCheck, Wifi, ArrowLeft,
+  QrCode, MessageCircle, Copy, CheckCheck, Wifi, ArrowLeft, Download, Eye, Printer,
 } from 'lucide-react';
+import html2pdf from 'html2pdf.js';
 import MedicalLoader from '../components/MedicalLoader.jsx';
 import CustomSelect from '../components/CustomSelect.jsx';
+import Modal from '../components/Modal.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
@@ -652,9 +654,133 @@ function CreateReceiptForm({ onClose, onSaved, authFetch, prefillPatient }) {
   );
 }
 
+// ─── Receipt Viewer Modal ─────────────────────────────────────────────────────
+// Doctor opens any billing record → sees a printable A4 receipt preview with
+// a Download PDF button. Uses html2pdf (already a project dependency) to
+// snapshot the preview element to a PDF file.
+function ReceiptViewerModal({ bill, onClose, doctorName }) {
+  if (!bill) return null;
+  const invoiceNo = bill.invoiceNumber || (bill._id ? bill._id.slice(-6).toUpperCase() : '—');
+  const dateStr = bill.createdAt
+    ? new Date(bill.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
+    : '—';
+  const timeStr = bill.createdAt
+    ? new Date(bill.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+    : '';
+  const items = Array.isArray(bill.items) && bill.items.length > 0
+    ? bill.items
+    : [{ description: bill.billType || 'Consultation', amount: bill.totalAmount || 0 }];
+
+  const handleDownload = () => {
+    const element = document.getElementById('receipt-pdf-content');
+    if (!element) return;
+    html2pdf().set({
+      margin: 0,
+      filename: `Receipt_${invoiceNo}_${(bill.patientName || 'Patient').replace(/\s+/g, '_')}.pdf`,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2.5, useCORS: true, logging: false, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+    }).from(element).save();
+  };
+
+  return (
+    <Modal
+      isOpen={!!bill}
+      onClose={onClose}
+      title={`Receipt · ${invoiceNo}`}
+      icon={<FileText size={20} color="var(--primary)" />}
+      maxWidth="640px"
+      footer={
+        <>
+          <button className="btn btn-secondary" onClick={onClose}>Close</button>
+          <button className="btn btn-primary" onClick={handleDownload}>
+            <Download size={14} /> Download PDF
+          </button>
+        </>
+      }
+    >
+      {/* A4-styled receipt — this exact element is snapshotted by html2pdf */}
+      <div id="receipt-pdf-content" style={{ background: 'white', color: '#111', fontFamily: 'Arial, sans-serif', padding: '24px 28px' }}>
+        {/* Clinic header */}
+        <div style={{ borderBottom: '2px solid #16a34a', paddingBottom: '12px', marginBottom: '18px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h2 style={{ color: '#16a34a', margin: 0, fontSize: '1.4rem', fontWeight: 800 }}>MediCore Clinic</h2>
+            <div style={{ fontSize: '0.78rem', color: '#555', marginTop: '2px' }}>
+              {doctorName ? `Dr. ${doctorName}` : 'Clinic Receipt'}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: '0.7rem', color: '#888', letterSpacing: '0.06em', fontWeight: 700 }}>RECEIPT</div>
+            <div style={{ fontWeight: 700, color: '#16a34a', fontSize: '0.95rem' }}>#{invoiceNo}</div>
+            <div style={{ fontSize: '0.78rem', color: '#555', marginTop: '2px' }}>{dateStr}{timeStr ? ` · ${timeStr}` : ''}</div>
+          </div>
+        </div>
+
+        {/* Patient block */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.82rem', marginBottom: '16px', color: '#333' }}>
+          <div><strong>Bill To:</strong> {bill.patientName || '—'}</div>
+          <div style={{ textAlign: 'right' }}><strong>Type:</strong> {bill.billType || 'Consultation'}</div>
+        </div>
+
+        {/* Items table */}
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', marginBottom: '14px' }}>
+          <thead>
+            <tr style={{ background: '#f0fdf4' }}>
+              <th style={{ textAlign: 'left', padding: '8px 10px', borderBottom: '1px solid #ddd', color: '#16a34a' }}>Description</th>
+              <th style={{ textAlign: 'right', padding: '8px 10px', borderBottom: '1px solid #ddd', color: '#16a34a' }}>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, i) => (
+              <tr key={i}>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid #eee' }}>{it.description}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid #eee', textAlign: 'right', fontWeight: 600 }}>{fmt(it.amount)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {/* Totals */}
+        <div style={{ marginLeft: 'auto', width: '60%', fontSize: '0.88rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px' }}>
+            <span>Subtotal</span><span style={{ fontWeight: 600 }}>{fmt(bill.totalAmount)}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px', borderTop: '1px solid #ddd', marginTop: '4px' }}>
+            <strong>Grand Total</strong>
+            <strong style={{ color: '#16a34a', fontSize: '1rem' }}>{fmt(bill.totalAmount)}</strong>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px', marginTop: '8px' }}>
+            <span>Status</span>
+            <span style={{ fontWeight: 700, color: bill.paidStatus ? '#16a34a' : '#b87333' }}>
+              {bill.paidStatus ? 'PAID' : 'PENDING'}
+            </span>
+          </div>
+          {bill.paymentMethod && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 10px' }}>
+              <span>Method</span><span style={{ fontWeight: 600 }}>{bill.paymentMethod}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Notes */}
+        {bill.notes && (
+          <div style={{ marginTop: '18px', padding: '10px 12px', background: '#f9fafb', borderRadius: '6px', fontSize: '0.78rem', color: '#555', borderLeft: '3px solid #16a34a' }}>
+            <strong>Notes:</strong> {bill.notes}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div style={{ marginTop: '24px', borderTop: '1px dashed #ccc', paddingTop: '12px', fontSize: '0.74rem', color: '#888', textAlign: 'center', fontStyle: 'italic' }}>
+          Thank you for visiting MediCore Clinic. Get well soon!
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ─── Main Billing Page ────────────────────────────────────────────────────────
 export default function Billing() {
-  const { authFetch } = useAuth();
+  const { authFetch, userName } = useAuth();
   const location = useLocation();
   // Deep-link from Patient Records: { newReceiptForPatient: {_id, name, ...} }
   // opens the Create Receipt form with that patient pre-selected.
@@ -671,6 +797,7 @@ export default function Billing() {
   const [showCreate, setShowCreate]  = useState(!!initialPrefill);
   const [prefillPatient, setPrefillPatient] = useState(initialPrefill);
   const [paymentBill, setPaymentBill] = useState(null);
+  const [viewBill, setViewBill]       = useState(null);  // bill currently being viewed in the Receipt Viewer modal
 
   // Clear the navigation state once consumed so a refresh doesn't re-open the form.
   useEffect(() => {
@@ -722,6 +849,13 @@ export default function Billing() {
           onPaid={() => { fetchBills(); }}
         />
       )}
+
+      {/* Receipt viewer with Download PDF */}
+      <ReceiptViewerModal
+        bill={viewBill}
+        onClose={() => setViewBill(null)}
+        doctorName={userName}
+      />
 
       <div className="page-header">
         <div>
@@ -846,17 +980,24 @@ export default function Billing() {
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {/* View → opens the printable Receipt with Download PDF */}
+                        <button
+                          className="btn btn-outline"
+                          style={{ padding: '5px 10px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+                          onClick={() => setViewBill(bill)}
+                          title="View / download receipt"
+                        >
+                          <Eye size={12} /> View
+                        </button>
                         {!bill.paidStatus && (
-                          <>
-                            <button
-                              className="btn btn-outline"
-                              style={{ padding: '5px 10px', fontSize: '0.78rem' }}
-                              onClick={() => markPaid(bill._id)}
-                              disabled={markingId === bill._id}
-                            >
-                              {markingId === bill._id ? <Loader2 size={12} className="animate-spin" /> : '✓ Cash'}
-                            </button>
-                          </>
+                          <button
+                            className="btn btn-outline"
+                            style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                            onClick={() => markPaid(bill._id)}
+                            disabled={markingId === bill._id}
+                          >
+                            {markingId === bill._id ? <Loader2 size={12} className="animate-spin" /> : '✓ Cash'}
+                          </button>
                         )}
                       </div>
                     </td>
