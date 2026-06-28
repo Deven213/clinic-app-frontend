@@ -166,7 +166,12 @@ export default function Patients() {
               {newThisWeek > 0 && <> · <span style={{ color: 'var(--primary)', fontWeight: 600 }}>{newThisWeek} new this week</span></>}
             </p>
           </div>
-          <button className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={() => setAddOpen(true)}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddOpen(true); }}
+          >
             <Plus size={18} /> Add patient
           </button>
         </div>
