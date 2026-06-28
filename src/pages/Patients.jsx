@@ -166,11 +166,13 @@ export default function Patients() {
               {newThisWeek > 0 && <> · <span style={{ color: 'var(--primary)', fontWeight: 600 }}>{newThisWeek} new this week</span></>}
             </p>
           </div>
+          {/* Add patient goes straight to the Prescription page so the doctor
+              can capture full demographics + write a prescription in one go. */}
           <button
             type="button"
             className="btn btn-primary"
             style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddOpen(true); }}
+            onClick={() => navigate('/prescription')}
           >
             <Plus size={18} /> Add patient
           </button>
@@ -318,12 +320,9 @@ export default function Patients() {
         )}
       </div>
 
-      <AddPatientModal
-        open={addOpen}
-        onClose={() => setAddOpen(false)}
-        authFetch={authFetch}
-        onCreated={() => fetchPatients()}
-      />
+      {/* AddPatientModal removed — the Add patient header button now navigates
+          straight to /prescription. The component is still defined above in
+          case it needs to be reused, but is no longer rendered here. */}
     </div>
   );
 }
